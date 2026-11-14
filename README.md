@@ -50,22 +50,51 @@
 
 ## 构建
 
+### 🌐 在 GitHub 上直接编译（零配置）
+
+仓库自带完整的 Gradle Wrapper（含 `gradle/wrapper/gradle-wrapper.jar`）和唯一的第三方依赖 `app/libs/jsch-2.28.8.jar`：没有 `local.properties`、没有私有 Maven 源、不需要任何 Secrets 或签名密钥。推到 GitHub 后 [`.github/workflows/build.yml`](.github/workflows/build.yml) 会自动开跑。
+
+| 触发方式 | 结果 |
+|---|---|
+| `push` 到 `main` / `master`、提交 PR | 编译 Debug + Release，Actions 页面提供 APK 下载（保留 30 天） |
+| 推送 `v*` 标签（如 `v2.0.0`） | 在上面基础上自动创建 GitHub Release，附上两个 APK |
+| Actions 页手动 `Run workflow` | 随时补一次构建 |
+
+CI 环境：`ubuntu-latest` + Temurin JDK 21，自动安装 `platforms;android-36`、`build-tools;36.0.0`、`platform-tools`，Gradle 发行版与依赖带缓存。产物在 **Actions → 对应 run → Artifacts** 下载：`OneSSH-debug` 可直接安装，`OneSSH-release-unsigned` 需先签名（见下）。
+
+首次上传（如尚未建仓）：
+
+```bash
+git init
+git add .
+git update-index --chmod=+x gradlew   # 保证 Linux runner 上可执行
+git commit -m "Initial commit: OneSSH 2.0.0"
+git remote add origin git@github.com:<OWNER>/<REPO>.git
+git push -u origin main
+```
+
+> Fork 后同样零配置，只需在 fork 仓库的 Actions 页面启用 workflows。流水线不写死账号、包名或路径，改仓库名不影响构建。
+
+### 💻 本地构建
+
 环境要求：
 
 | 组件 | 版本 |
 |---|---|
-| JDK | 17+（实测 JDK 21） |
-| Android SDK | platform `android-36`、build-tools `36.x`／`37.x` |
+| JDK | 17+（CI 与实测均用 Temurin / JBR 21） |
+| Android SDK | platform `android-36`、build-tools `36.0.0`（AGP 9.1.0 默认） |
 | Gradle | 9.3.1（已配好 wrapper，无需本机预装） |
 | Android Gradle Plugin | 9.1.0 |
 
 ```bash
 # 首次构建需联网下载 Gradle 发行版与 AGP；之后可加 --offline
-./gradlew assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
-./gradlew assembleRelease    # app/build/outputs/apk/release/app-release-unsigned.apk
+./gradlew assembleDebug      # app/build/outputs/apk/debug/app-debug.apk                约 1.2 MB
+./gradlew assembleRelease    # app/build/outputs/apk/release/app-release-unsigned.apk  约 1.0 MB
 ```
 
 用 Android Studio 打开根目录即可，`local.properties` 会自动生成（**不要提交**，里面是本机 SDK 绝对路径）。JSch 的 jar 已在 `app/libs/`，`settings.gradle.kts` 只配了 google() / mavenCentral()，构建不会去拉额外运行时依赖。
+
+> ✅ 已实测：JDK 21.0.9 + Android SDK 36 / build-tools 36.0.0 下 `assembleDebug assembleRelease` 一次通过（73 个 task、约 40 秒），产物为 `com.onessh.app` 2.0.0（minSdk 26 / targetSdk 34）。
 
 ### 签名 Release
 
@@ -75,14 +104,16 @@
 keytool -genkeypair -v -keystore keystore/onessh-release.jks \
   -alias onessh-release -keyalg RSA -keysize 2048 -validity 10000
 
-$ANDROID_HOME/build-tools/37.0.0/zipalign -p -f 4 \
+$ANDROID_HOME/build-tools/36.0.0/zipalign -p -f 4 \
   app/build/outputs/apk/release/app-release-unsigned.apk /tmp/aligned.apk
-$ANDROID_HOME/build-tools/37.0.0/apksigner sign \
+$ANDROID_HOME/build-tools/36.0.0/apksigner sign \
   --ks keystore/onessh-release.jks --out OneSSH-2.0.0.apk /tmp/aligned.apk
-$ANDROID_HOME/build-tools/37.0.0/apksigner verify OneSSH-2.0.0.apk
+$ANDROID_HOME/build-tools/36.0.0/apksigner verify OneSSH-2.0.0.apk
 ```
 
 也可以直接在 `app/build.gradle.kts` 里配 `signingConfigs`，用环境变量读密码，避免写死在脚本里。
+
+> CI 默认**只产出未签名 Release APK**（仓库不含 keystore，`.gitignore` 也排除了 `*.jks` / `keystore/`）。若想让 GitHub Actions 直接出签名包：把 keystore 以 base64 存进仓库 Secrets（如 `SIGNING_KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`），在 workflow 中解码到 `keystore/onessh-release.jks`，再于 `app/build.gradle.kts` 用 `System.getenv()` 读取并配置 `signingConfigs`。调试和自用请优先下载 `OneSSH-debug`，它带 debug 签名，可直接安装。
 
 ## 目录结构
 
@@ -96,12 +127,14 @@ app/src/main/java/com/onessh/app/
 app/libs/jsch-2.28.8.jar 唯一第三方依赖
 ```
 
+根目录另有 `.github/workflows/build.yml`（GitHub Actions 流水线）与 `.gitattributes`（固定 `gradlew` 用 LF 行尾、二进制文件不做换行转换）。
+
 ## 依赖与许可
 
 - [JSch 2.28.8](http://www.jcraft.com/jsch/) —— SSH2 实现，以 jar 形式随仓库分发，遵循其原有 BSD 风格许可
-- 本项目尚未指定许可证，上传到 GitHub 时请自行选择（MIT / Apache-2.0 / GPL-3.0 等）并添加 `LICENSE` 文件
+- 本项目尚未指定许可证，上传到 GitHub 时请自行选择（MIT / Apache-2.0 / GPL-3.0 等）并添加 `LICENSE` 文件；随仓库分发的 JSch jar 建议在 `app/libs/` 附一份其原始许可文本
 
 ## 说明
 
 - 主机、密码、私钥、指纹全部只保存在应用私有目录，卸载即清除；没有云同步，也没有账号体系
-- 项目不含单元测试与 CI 配置，后续可自行补 `app/src/test/` 与 GitHub Actions
+- CI 由 `.github/workflows/build.yml` 提供（编译 → 上传 APK → 打标签发版）；项目目前仍不含单元测试，后续可补 `app/src/test/`
