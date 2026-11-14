@@ -13,6 +13,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -47,6 +48,9 @@ public class MainActivity extends Activity {
     private LinearLayout listBox;
     private TextView countText;
     private EditText searchInput;
+    /** 最小化会话的悬浮卡片：只在有最小化终端时出现，贴在右侧 */
+    private View minimizedCard;
+    private TextView minimizedLabel;
 
     private String query = "";
     private String groupFilter = "";
@@ -74,13 +78,84 @@ public class MainActivity extends Activity {
         root.addView(buildContent(), new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 1f));
 
-        setContentView(root);
+        // 悬浮卡片盖在内容上面、贴右边缘，不占布局位置
+        FrameLayout frame = new FrameLayout(this);
+        frame.addView(root, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        minimizedCard = buildMinimizedCard();
+        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.END | Gravity.CENTER_VERTICAL);
+        cp.rightMargin = UI.dp(10);
+        frame.addView(minimizedCard, cp);
+
+        setContentView(frame);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         render();
+        updateMinimizedCard();
+    }
+
+    @Override
+    public void onBackPressed() {
+        // 有最小化的会话时，返回键不是退出，而是把整个应用退到后台：
+        // 否则按返回会先把主机列表弹掉、露出底下的终端，等于白最小化了。
+        if (SessionRegistry.hasMinimized()) {
+            moveTaskToBack(true);
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    /** 右侧悬浮卡片：绿点 + 主机名，点一下回到终端 */
+    private View buildMinimizedCard() {
+        LinearLayout pill = UI.row(this);
+        pill.setGravity(Gravity.CENTER_VERTICAL);
+        pill.setBackground(UI.bg(UI.TERM_BG, 99f));
+        pill.setElevation(UI.dp(6f));
+        pill.setPadding(UI.dp(12), UI.dp(10), UI.dp(12), UI.dp(10));
+
+        View dot = new View(this);
+        dot.setBackground(UI.bg(UI.GREEN, 99f));
+        pill.addView(dot, new LinearLayout.LayoutParams(UI.dp(8), UI.dp(8)));
+
+        minimizedLabel = UI.medium(this, "", 12.5f, UI.TERM_FG);
+        minimizedLabel.setSingleLine(true);
+        minimizedLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = UI.dp(8);
+        lp.rightMargin = UI.dp(8);
+        minimizedLabel.setMaxWidth(UI.dp(150));
+        minimizedLabel.setLayoutParams(lp);
+        pill.addView(minimizedLabel);
+
+        pill.addView(UI.icon(this, "terminal", UI.TERM_FG, 15));
+        pill.setOnClickListener(v -> restoreMinimized());
+        pill.setVisibility(View.GONE);
+        return pill;
+    }
+
+    private void updateMinimizedCard() {
+        if (minimizedCard == null) return;
+        if (SessionRegistry.hasMinimized()) {
+            minimizedLabel.setText(SessionRegistry.label());
+            minimizedCard.setVisibility(View.VISIBLE);
+        } else {
+            minimizedCard.setVisibility(View.GONE);
+        }
+    }
+
+    private void restoreMinimized() {
+        Intent i = SessionRegistry.restoreIntent();
+        if (i == null) {
+            updateMinimizedCard();
+            return;
+        }
+        startActivity(i);
     }
 
     /* ------------------------------------------------------------- 导航栏 */
@@ -514,6 +589,16 @@ public class MainActivity extends Activity {
     }
 
     private void connect(Host h) {
+        if (SessionRegistry.hasMinimized()) {
+            // 点的正是最小化那个主机：直接回终端，别再开一个新会话
+            if (SessionRegistry.label().equals(h.label())) {
+                restoreMinimized();
+                return;
+            }
+            // 点的是别的主机：先关掉旧的最小化会话（只允许一个会话），再连新的
+            TerminalActivity old = SessionRegistry.activity();
+            if (old != null) old.finishMinimized();
+        }
         store.touchHost(h.id);
         Intent i = new Intent(this, TerminalActivity.class);
         i.putExtra(TerminalActivity.EXTRA_HOST_ID, h.id);
@@ -553,12 +638,17 @@ public class MainActivity extends Activity {
             String addr = host.text().trim();
             if (addr.isEmpty()) {
                 UI.toast(this, "地址不能为空");
-                return;
+                return false;
             }
             int p = 22;
             try {
                 p = Integer.parseInt(port.text().trim());
             } catch (Exception ignored) {
+            }
+            // 快速连接是另一台主机：先关掉最小化的旧会话，再连新的
+            if (SessionRegistry.hasMinimized()) {
+                TerminalActivity old = SessionRegistry.activity();
+                if (old != null) old.finishMinimized();
             }
             Intent i = new Intent(this, TerminalActivity.class);
             i.putExtra(TerminalActivity.EXTRA_HOST, addr);
@@ -566,6 +656,7 @@ public class MainActivity extends Activity {
             i.putExtra(TerminalActivity.EXTRA_USER, user.text().trim());
             i.putExtra(TerminalActivity.EXTRA_PASSWORD, pass.text());
             startActivity(i);
+            return true;
         });
     }
 

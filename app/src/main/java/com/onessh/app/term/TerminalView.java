@@ -10,7 +10,11 @@ import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.HapticFeedbackConstants;
 import android.view.VelocityTracker;
+import android.view.ViewConfiguration;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -36,6 +40,10 @@ public class TerminalView extends View {
         /** Ctrl 锁存状态变化，用来给按键上高亮 */
         default void onCtrlLatch(boolean on) {
         }
+
+        /** 长按终端：y 是按下时的触摸纵坐标，Activity 据此取行并弹复制菜单 */
+        default void onLongPress(float y) {
+        }
     }
 
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -57,6 +65,15 @@ public class TerminalView extends View {
     private VelocityTracker tracker;
     private float lastY;
     private boolean dragging;
+
+    /* 长按复制：按住不动够久就高亮那一行并回调 Activity 弹菜单 */
+    private final Handler longPressHandler = new Handler(Looper.getMainLooper());
+    private Runnable longPressTask;
+    private float downX;
+    private float downY;
+    private boolean longPressed;
+    /** 正在高亮的行（回滚区 + 当前屏的统一行号），-1 表示没有 */
+    private int selIndex = -1;
 
     private boolean cursorOn = true;
     private boolean attached;
@@ -193,6 +210,10 @@ public class TerminalView extends View {
             TerminalBuffer.Line line = lineAt(topIndex + row);
             if (line == null) continue;
             float top = row * cellH;
+            if (topIndex + row == selIndex) {
+                fillPaint.setColor(TermColors.SELECTION);
+                canvas.drawRect(0, top, getWidth(), top + cellH, fillPaint);
+            }
             drawBackgrounds(canvas, line, top);
             drawText(canvas, line, top);
         }
@@ -389,12 +410,34 @@ public class TerminalView extends View {
                 scroller.forceFinished(true);
                 lastY = ev.getY();
                 dragging = false;
+                longPressed = false;
+                downX = ev.getX();
+                downY = ev.getY();
+                if (selIndex >= 0) {
+                    selIndex = -1;
+                    invalidate();
+                }
                 requestFocus();
+                cancelPendingLongPress();
+                longPressTask = () -> {
+                    longPressed = true;
+                    selIndex = indexAtY(downY);
+                    invalidate();
+                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                    if (listener != null) listener.onLongPress(downY);
+                };
+                longPressHandler.postDelayed(longPressTask,
+                        ViewConfiguration.getLongPressTimeout());
                 return true;
             }
             case MotionEvent.ACTION_MOVE: {
                 if (tracker != null) tracker.addMovement(ev);
                 float dy = lastY - ev.getY();
+                int slop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
+                if (Math.abs(ev.getX() - downX) > slop
+                        || Math.abs(ev.getY() - downY) > slop) {
+                    cancelPendingLongPress();
+                }
                 if (Math.abs(dy) > 1) {
                     dragging = true;
                     scrollPx = Math.max(0, Math.min(maxScrollPx(), scrollPx + dy));
@@ -404,6 +447,7 @@ public class TerminalView extends View {
                 return true;
             }
             case MotionEvent.ACTION_UP: {
+                cancelPendingLongPress();
                 if (tracker != null) {
                     tracker.addMovement(ev);
                     tracker.computeCurrentVelocity(1000);
@@ -413,13 +457,14 @@ public class TerminalView extends View {
                     if (dragging && Math.abs(vy) > 400) {
                         scroller.fling(0, (int) scrollPx, 0, (int) -vy, 0, 0, 0, (int) maxScrollPx());
                         postInvalidateOnAnimation();
-                    } else if (!dragging) {
+                    } else if (!dragging && !longPressed) {
                         showIme();
                     }
                 }
                 return true;
             }
             case MotionEvent.ACTION_CANCEL: {
+                cancelPendingLongPress();
                 if (tracker != null) {
                     tracker.recycle();
                     tracker = null;
@@ -428,6 +473,33 @@ public class TerminalView extends View {
             }
             default:
                 return super.onTouchEvent(ev);
+        }
+    }
+
+    private void cancelPendingLongPress() {
+        if (longPressTask != null) {
+            longPressHandler.removeCallbacks(longPressTask);
+            longPressTask = null;
+        }
+    }
+
+    /** 触摸纵坐标换算成“回滚区 + 当前屏”的统一行号，跟 onDraw 用的算法一致 */
+    private int indexAtY(float y) {
+        int topIndex = buffer.scrollbackSize() - Math.round(scrollPx / cellH);
+        return topIndex + (int) (y / cellH);
+    }
+
+    /** 取触摸点那一行的文本（去掉了行尾空格），点到空白处返回空串 */
+    public String lineTextAt(float y) {
+        String t = buffer.lineTextAt(indexAtY(y));
+        return t == null ? "" : t;
+    }
+
+    /** 清掉长按高亮 */
+    public void clearSelection() {
+        if (selIndex >= 0) {
+            selIndex = -1;
+            invalidate();
         }
     }
 
@@ -551,8 +623,12 @@ public class TerminalView extends View {
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo out) {
+        // 终端不是密码框：不要用 TYPE_TEXT_VARIATION_VISIBLE_PASSWORD。
+        // 之前用它是想禁联想，但鸿蒙/华为会把带密码变体的输入框当密码框，
+        // 连接后一弹键盘就强制拉起安全键盘（无联想、无剪贴板、布局受限）。
+        // 改回普通文本输入，TYPE_TEXT_FLAG_NO_SUGGESTIONS 继续禁联想/学习，
+        // 中文拼音照常走 commitText。
         out.inputType = InputType.TYPE_CLASS_TEXT
-                | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
         out.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
