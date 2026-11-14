@@ -66,6 +66,7 @@ public final class Icons {
         PATHS.put("check", "m5 12.5 4.5 4.5L19 7.5");
         PATHS.put("clock", "M12 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16zM12 8v4.5l3 1.8");
         PATHS.put("shield", "M12 3.5 5 6v6c0 4 3 7 7 8.5 4-1.5 7-4.5 7-8.5V6z");
+        PATHS.put("minimize", "M5 12h14");
     }
 
     private Icons() {}
