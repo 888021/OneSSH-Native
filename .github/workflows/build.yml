@@ -1,0 +1,166 @@
+name: Android CI
+
+# 推到 GitHub 后无需任何配置即可编译：
+# - push / PR：自动编译 Debug + Release，并在 Actions 页面提供 APK 下载
+# - 推送 v* 标签 / 推送到主分支 / 手动勾选发布：自动创建或更新 GitHub Release 并附上两个 APK
+# 版本号唯一来源：app/build.gradle.kts 的 versionCode / versionName。
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '同时创建 GitHub Release 并附上 APK（无需打标签）'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 编译 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.name }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 准备 Gradle（wrapper 校验 + 依赖缓存）
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: 定位 Android SDK 与 sdkmanager
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMGR=$(command -v sdkmanager || true)
+          if [ -z "$SDKMGR" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ -z "$SDKMGR" ]; then
+            SDKMGR=$(find "$ANDROID_HOME/cmdline-tools" -type f -path "*/bin/sdkmanager" 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$SDKMGR" ]; then
+            echo "::error::在 $ANDROID_HOME 下未找到 sdkmanager"
+            exit 1
+          fi
+          chmod +x "$SDKMGR" 2>/dev/null || true
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "SDKMGR=$SDKMGR" >> "$GITHUB_ENV"
+
+      - name: 接受许可并安装 compileSdk 36 / build-tools 36.0.0
+        run: |
+          yes 2>/dev/null | "$SDKMGR" --sdk_root="$ANDROID_HOME" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" --sdk_root="$ANDROID_HOME" --install \
+            "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: 确认 gradlew 可执行
+        run: chmod +x gradlew
+
+      - name: 读取版本号
+        id: version
+        run: |
+          V=$(sed -n 's/.*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          C=$(sed -n 's/.*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
+          if [ -z "$V" ] || [ -z "$C" ]; then
+            echo "::error::未能从 app/build.gradle.kts 读取 versionName / versionCode"
+            exit 1
+          fi
+          echo "name=$V" >> "$GITHUB_OUTPUT"
+          echo "code=$C" >> "$GITHUB_OUTPUT"
+          echo "版本：$V (versionCode $C)"
+
+      - name: 校验标签与版本号一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          V="${{ steps.version.outputs.name }}"
+          if [ "$TAG" != "$V" ]; then
+            echo "::warning::标签 v$TAG 与 app/build.gradle.kts 的 versionName $V 不一致，请核对"
+          fi
+
+      - name: 编译 Debug / Release
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+
+      - name: 归档带版本号的 APK
+        run: |
+          V="${{ steps.version.outputs.name }}"
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk "dist/OneSSH-${V}-debug.apk"
+          
+          # 兼容已签名 (app-release.apk) 和未签名 (app-release-unsigned.apk) 两种产物
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [[ "$RELEASE_APK" == *"-unsigned.apk" ]]; then
+            cp "$RELEASE_APK" "dist/OneSSH-${V}-release-unsigned.apk"
+          else
+            cp "$RELEASE_APK" "dist/OneSSH-${V}-release.apk"
+          fi
+          
+          ls -lh dist
+          sha256sum dist/*.apk
+
+      - name: 上传 Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OneSSH-${{ steps.version.outputs.name }}-debug
+          path: dist/*-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传 Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OneSSH-${{ steps.version.outputs.name }}-release
+          path: dist/*-release*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: 发布 Release
+    # 触发条件：
+    # 1. 推送 v* 标签
+    # 2. 推送代码到 main 或 master 分支（如不想每次 push 都发版，请删除下面这行中的 main/master 判断）
+    # 3. 手动触发且勾选了 publish_release
+    if: >
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/master' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 下载本次构建的 APK
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 创建或更新 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.build.outputs.version) }}
+          name: OneSSH ${{ needs.build.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*.apk
