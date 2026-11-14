@@ -4,6 +4,8 @@ name: Android CI
 # - push / PR：自动编译 Debug + Release，并在 Actions 页面提供 APK 下载
 # - 推送 v* 标签：额外自动创建 GitHub Release 并附上两个 APK
 # - 也可以在 Actions 页面手动点 "Run workflow"
+# 版本号唯一来源：app/build.gradle.kts 的 versionCode / versionName。
+# 每次构建自动读取，产物名与 Release 附件都会带上该版本号。
 on:
   push:
     branches: [main, master]
@@ -41,13 +43,40 @@ jobs:
           # PR 只读缓存，避免未合并代码污染主干缓存
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
-      - name: 准备 Android SDK 命令行工具
-        uses: android-actions/setup-android@v3
-
-      - name: 安装 compileSdk 36 与 build-tools 36.0.0
+      # 不用 android-actions/setup-android：v3 的 packages 默认是
+      # "tools platform-tools"，legacy tools 包已被 Google 下架，会在这一步
+      # 直接报 "Failed to find package 'tools'" 并退出 1。
+      # ubuntu-latest 自带 Android SDK，定位预装的 sdkmanager 即可。
+      - name: 定位 Android SDK 与 sdkmanager
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMGR=$(command -v sdkmanager || true)
+          if [ -z "$SDKMGR" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ -z "$SDKMGR" ]; then
+            SDKMGR=$(find "$ANDROID_HOME/cmdline-tools" -type f -path "*/bin/sdkmanager" 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$SDKMGR" ]; then
+            echo "::error::在 $ANDROID_HOME 下未找到 sdkmanager"
+            exit 1
+          fi
+          chmod +x "$SDKMGR" 2>/dev/null || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "sdkmanager=$SDKMGR"
+          "$SDKMGR" --sdk_root="$ANDROID_HOME" --version
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "SDKMGR=$SDKMGR" >> "$GITHUB_ENV"
+
+      - name: 接受许可并安装 compileSdk 36 / build-tools 36.0.0
+        run: |
+          yes 2>/dev/null | "$SDKMGR" --sdk_root="$ANDROID_HOME" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" --sdk_root="$ANDROID_HOME" --install \
+            "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          echo "=== 已安装的关键包 ==="
+          "$SDKMGR" --sdk_root="$ANDROID_HOME" --list_installed \
+            | grep -E "platforms;android-36|build-tools;36.0.0|platform-tools" || true
 
       - name: 确认 gradlew 可执行
         run: chmod +x gradlew
@@ -57,27 +86,53 @@ jobs:
           java -version
           ./gradlew --version
 
+      - name: 读取版本号
+        id: version
+        run: |
+          V=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          C=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
+          if [ -z "$V" ] || [ -z "$C" ]; then
+            echo "::error::未能从 app/build.gradle.kts 读取 versionName / versionCode"
+            exit 1
+          fi
+          echo "name=$V" >> "$GITHUB_OUTPUT"
+          echo "code=$C" >> "$GITHUB_OUTPUT"
+          echo "版本：$V (versionCode $C)"
+
+      - name: 校验标签与版本号一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          V="${{ steps.version.outputs.name }}"
+          if [ "$TAG" != "$V" ]; then
+            echo "::warning::标签 v$TAG 与 app/build.gradle.kts 的 versionName $V 不一致，请核对"
+          fi
+
       - name: 编译 Debug / Release
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
 
-      - name: 产物清单与校验和
+      - name: 归档带版本号的 APK
         run: |
-          ls -lh app/build/outputs/apk/*/*.apk
-          sha256sum app/build/outputs/apk/*/*.apk
+          V="${{ steps.version.outputs.name }}"
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/OneSSH-${V}-debug.apk"
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "dist/OneSSH-${V}-release-unsigned.apk"
+          ls -lh dist
+          sha256sum dist/*.apk
 
       - name: 上传 Debug APK（可直接安装）
         uses: actions/upload-artifact@v4
         with:
-          name: OneSSH-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: OneSSH-${{ steps.version.outputs.name }}-debug
+          path: dist/*-debug.apk
           if-no-files-found: error
           retention-days: 30
 
       - name: 上传 Release APK（未签名）
         uses: actions/upload-artifact@v4
         with:
-          name: OneSSH-release-unsigned
-          path: app/build/outputs/apk/release/*.apk
+          name: OneSSH-${{ steps.version.outputs.name }}-release-unsigned
+          path: dist/*-release-unsigned.apk
           if-no-files-found: error
           retention-days: 30
 
