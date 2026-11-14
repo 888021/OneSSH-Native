@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OneSSH</string>
+
+    <string name="eyebrow_infra">YOUR INFRASTRUCTURE</string>
+    <string name="dash_title">我的主机</string>
+    <string name="dash_sub">安全保存，随时连接。</string>
+    <string name="search_hint">搜索名称 / 地址 / 备注</string>
+    <string name="add_host">添加主机</string>
+    <string name="no_hosts">还没有主机。点右上角「添加主机」开始。</string>
+    <string name="no_result">没有匹配的主机</string>
+    <string name="ungrouped">未分组</string>
+    <string name="nav_hosts">主机</string>
+    <string name="nav_vault">凭据</string>
+    <string name="nav_settings">设置</string>
+
+    <string name="host_new">添加主机</string>
+    <string name="host_edit">编辑主机</string>
+    <string name="field_name">名称</string>
+    <string name="field_name_hint">例如：生产 Web</string>
+    <string name="field_group">分组</string>
+    <string name="field_group_hint">留空即未分组</string>
+    <string name="field_host">地址</string>
+    <string name="field_host_hint">域名、IPv4 或 IPv6</string>
+    <string name="field_port">端口</string>
+    <string name="field_user">用户名</string>
+    <string name="field_auth">认证方式</string>
+    <string name="auth_password">密码</string>
+    <string name="auth_key">私钥</string>
+    <string name="field_password">密码</string>
+    <string name="field_password_keep">留空则不修改已保存的密码</string>
+    <string name="field_note">备注</string>
+    <string name="field_note_hint">可选，例如用途或机房</string>
+    <string name="pick_cred">从凭据库选择</string>
+    <string name="pick_key">从私钥库选择</string>
+    <string name="save">保存</string>
+    <string name="cancel">取消</string>
+    <string name="delete">删除</string>
+    <string name="delete_host_title">删除主机</string>
+    <string name="delete_host_msg">确定删除「%1$s」吗？只删本机记录，不影响服务器。</string>
+    <string name="err_host_required">地址不能为空</string>
+    <string name="err_user_required">用户名不能为空</string>
+    <string name="err_port">端口范围 1-65535</string>
+    <string name="err_password_required">请填写密码，或从凭据库选择</string>
+    <string name="err_key_required">请选择私钥，或粘贴私钥内容</string>
+
+    <string name="connecting">正在连接…</string>
+    <string name="connected">已连接</string>
+    <string name="disconnected">已断开</string>
+    <string name="reconnect">重新连接</string>
+    <string name="disconnect">断开</string>
+    <string name="files">文件</string>
+    <string name="copy_all">复制全部</string>
+    <string name="clear_screen">清屏</string>
+    <string name="font_size">字号</string>
+    <string name="hostkey_title">首次连接这台主机</string>
+    <string name="hostkey_msg">请核对主机密钥指纹，确认这是你认识的服务器。\n\n%1$s\n\n指纹变化通常意味着服务器被重装，也可能意味着中间人攻击。</string>
+    <string name="hostkey_changed_title">主机密钥已变化</string>
+    <string name="hostkey_changed_msg">这台服务器之前的指纹是\n%1$s\n\n现在变成了\n%2$s\n\n如果不是你重装了系统，请立刻断开。</string>
+    <string name="trust_and_connect">信任并连接</string>
+    <string name="abort">取消连接</string>
+
+    <string name="vault_title">凭据库</string>
+    <string name="vault_sub">账号与私钥只保存在本机，用系统密钥库加密。</string>
+    <string name="tab_accounts">常用账号</string>
+    <string name="tab_keys">私钥</string>
+    <string name="add_account">新建账号</string>
+    <string name="add_key">导入私钥</string>
+    <string name="cred_name">名称</string>
+    <string name="cred_user">用户名</string>
+    <string name="cred_pass">密码</string>
+    <string name="key_body">私钥内容</string>
+    <string name="key_body_hint">-----BEGIN OPENSSH PRIVATE KEY-----</string>
+    <string name="key_passphrase">私钥口令</string>
+    <string name="key_passphrase_hint">没有口令就留空</string>
+    <string name="vault_empty_accounts">还没有保存的账号</string>
+    <string name="vault_empty_keys">还没有导入私钥</string>
+    <string name="in_use">有 %1$d 台主机正在使用，无法删除</string>
+
+    <string name="files_title">文件</string>
+    <string name="files_upload">上传</string>
+    <string name="files_newdir">新建文件夹</string>
+    <string name="files_empty">这个目录是空的</string>
+    <string name="files_loading">读取中…</string>
+    <string name="rename">重命名</string>
+    <string name="new_folder">新建文件夹</string>
+    <string name="folder_name">文件夹名称</string>
+    <string name="saved_to">已保存到 %1$s</string>
+    <string name="uploading">上传中 %1$d%%</string>
+    <string name="downloading">下载中 %1$d%%</string>
+
+    <string name="settings_title">设置</string>
+    <string name="settings_terminal">终端</string>
+    <string name="settings_font">终端字号</string>
+    <string name="settings_keepawake">终端页保持常亮</string>
+    <string name="settings_security">安全</string>
+    <string name="settings_known_hosts">已信任的主机密钥</string>
+    <string name="settings_known_empty">还没有信任过任何主机</string>
+    <string name="settings_clear">清空全部数据</string>
+    <string name="settings_clear_msg">将删除所有主机、分组、凭据和已信任的密钥。此操作不可撤销。</string>
+    <string name="settings_about">关于</string>
+    <string name="settings_about_body">原生安卓 SSH 客户端：自研 VT100/xterm 终端、SFTP 文件管理，凭据用 Android Keystore 加密保存在本机，不经过任何服务器。\n\nUI 沿用 jinhuaitao/OneSSH 的网页版设计。</string>
+    <string name="done">完成</string>
+</resources>
