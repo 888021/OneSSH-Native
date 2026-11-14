@@ -77,6 +77,8 @@
 
 产物：`OneSSH-2.0.0-debug.apk`（可直接安装）、`OneSSH-2.0.0-release-unsigned.apk`（需签名）。在 **Actions → 对应 run → Artifacts** 下载，保留 30 天。
 
+> 🔑 CI 使用仓库内固定的 debug 密钥签名，**每次构建的 debug 包签名一致，可直接覆盖安装**。若手机提示「软件包冲突 / 开发者签名异常」，说明旧版是另一把密钥签的：先卸载旧版再安装（会清空应用数据），之后升级就不会再冲突。
+
 **版本号只改一处**：`app/build.gradle.kts` 的 `versionCode` / `versionName`（当前 `2` / `2.0.0`）。改了就出新版本 Release，不改就更新现有 Release 里的 APK；不用打标签、不用勾选开关。
 
 ### 本地
@@ -131,6 +133,7 @@ app/libs/jsch-2.28.8.jar   唯一第三方依赖
 
 - `ubuntu-latest` + Temurin JDK 21，自动安装 `platforms;android-36` / `build-tools;36.0.0` / `platform-tools`，Gradle 带缓存。
 - ⚠️ 不要加回 `android-actions/setup-android@v3`：它默认安装已下架的 `tools` 包，会报 `Failed to find package 'tools'` 并退出 1。流水线直接定位 runner 预装的 `sdkmanager`。
+- 🔑 `app/debug.keystore.base64` 是 CI 固定 debug 签名，证书 SHA-256 `7D:79:52:39:C2:B3:9B:F3:56:C7:0B:C4:D5:13:A7:9F:7F:E8:1E:BE:D8:51:DD:5E:81:85:93:7E:F8:D0:95:0D`（**仅调试用，切勿用于正式发布**）。
 - ✅ 实测：JDK 21.0.9 + SDK 36，`assembleDebug assembleRelease` 一次通过（73 tasks，约 40 秒）。
 - 只有 PR 里 `发布 Release` 会显示 skipped，属正常。
 
