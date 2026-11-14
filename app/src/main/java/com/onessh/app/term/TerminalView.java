@@ -551,12 +551,8 @@ public class TerminalView extends View {
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo out) {
-        // 终端不是密码框：不要用 TYPE_TEXT_VARIATION_VISIBLE_PASSWORD。
-        // 之前用它是想禁联想，但鸿蒙/华为会把带密码变体的输入框当密码框，
-        // 连接后一弹键盘就强制拉起安全键盘（无联想、无剪贴板、布局受限）。
-        // 改回普通文本输入，TYPE_TEXT_FLAG_NO_SUGGESTIONS 继续禁联想/学习，
-        // 中文拼音照常走 commitText。
         out.inputType = InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
         out.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI;

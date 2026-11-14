@@ -50,17 +50,17 @@
 
 </details>
 
-## 🧭 跳板机链路
+## 🔀 跳板机链路
 
-```mermaid
-flowchart LR
-    A["手机"] --> B["跳板机 SSH"]
-    B -->|"direct-tcpip 可用"| D["目标主机"]
-    B -->|"AllowTcpForwarding no"| C["nc / ncat / socat 命令隧道"]
-    C --> D
-```
+> 📱 手机 ──SSH──▶ 🛰️ 跳板机 ──隧道──▶ 🎯 目标主机　·　单跳
 
-> 先试标准 `direct-tcpip`；被 sshd 禁用就自动降级到跳板机上的命令隧道；两者都失败才报错，并区分「缺管道工具」与「连不到目标」。仅支持单跳，命令隧道要求跳板机账号能执行 shell（`ForceCommand` / `rbash` 环境只能打开 `AllowTcpForwarding`）。
+| 顺序 | 通道 | 何时使用 |
+|:---:|:---|:---|
+| 1️⃣ | `direct-tcpip` | 默认，标准 ProxyJump，先预检再复用，性能最好 |
+| 2️⃣ | `nc` / `ncat` / `socat` 命令隧道 | sshd 设了 `AllowTcpForwarding no` 时自动降级，用 `exec` 通道的 stdin/stdout 承载 TCP |
+| 3️⃣ | ❌ 明确报错 | 两条都不通，并区分「跳板机缺管道工具」与「连不到目标」 |
+
+> 限制：只支持单跳；命令隧道要求跳板机账号能执行 shell，`ForceCommand` / `rbash` 环境只能打开 `AllowTcpForwarding`。
 
 ## 🚀 构建
 
