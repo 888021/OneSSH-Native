@@ -394,11 +394,13 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
                 if (host != null) store.touchHost(host.id);
                 break;
             case "closed":
+                SessionRegistry.clear();
                 setStatus("closed", getString(R.string.disconnected));
                 showOverlay("closed", getString(R.string.disconnected),
                         "会话已结束。可以重新连接。");
                 break;
             case "error":
+                SessionRegistry.clear();
                 setStatus("error", getString(R.string.disconnected));
                 showOverlay("error", "连接失败", message);
                 break;
@@ -437,19 +439,22 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
 
     private void moreMenu() {
         Dialogs.sheet(this, host != null ? host.label() : adHocHost,
-                new String[]{"复制全部输出", "清屏", "终端字号", "重新连接", "断开连接"},
-                new String[]{"copy", "trash", "gear", "refresh", "power"}, 4, idx -> {
+                new String[]{"最小化", "复制全部输出", "清屏", "终端字号", "重新连接", "断开连接"},
+                new String[]{"minimize", "copy", "trash", "gear", "refresh", "power"}, 5, idx -> {
                     switch (idx) {
                         case 0:
-                            copyAll();
+                            minimize();
                             break;
                         case 1:
-                            term.clearScreen();
+                            copyAll();
                             break;
                         case 2:
-                            fontSheet();
+                            term.clearScreen();
                             break;
                         case 3:
+                            fontSheet();
+                            break;
+                        case 4:
                             term.clearScreen();
                             connect();
                             break;
@@ -458,6 +463,46 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
                             break;
                     }
                 });
+    }
+
+    /**
+     * 最小化：会话不断，只是把主机列表带到前台。
+     * TerminalActivity 退到后台栈里（不走 onDestroy），SshSession 的线程
+     * 继续跑，输出继续进 TerminalView 的缓冲，回来后原样都在。
+     * 只有连上之后才能最小化；还没连上时点了也没意义。
+     */
+    private void minimize() {
+        if (session == null || !session.isConnected()) {
+            UI.toast(this, "还没连上，等连接成功再最小化");
+            return;
+        }
+        SessionRegistry.minimize(this,
+                host != null ? host.label() : adHocUser + "@" + adHocHost,
+                restoreIntent());
+        Intent i = new Intent(this, MainActivity.class);
+        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        startActivity(i);
+    }
+
+    /** 回到终端用的 Intent：页面还在就把它带到前台；万一已被系统回收， */
+    private Intent restoreIntent() {
+        Intent i = new Intent(this, TerminalActivity.class);
+        if (hostId != null && !hostId.isEmpty()) {
+            i.putExtra(EXTRA_HOST_ID, hostId);
+        } else {
+            i.putExtra(EXTRA_HOST, adHocHost);
+            i.putExtra(EXTRA_PORT, adHocPort);
+            i.putExtra(EXTRA_USER, adHocUser);
+            i.putExtra(EXTRA_PASSWORD, adHocPassword);
+        }
+        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        return i;
+    }
+
+    /** 主机列表切到别的主机时用：清登记再 finish，onDestroy 会关掉旧会话 */
+    public void finishMinimized() {
+        SessionRegistry.clear();
+        finish();
     }
 
     /** 把保存的片段直接发到当前会话 */
@@ -535,6 +580,9 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
 
     @Override
     protected void onDestroy() {
+        // 最小化时不走这里；真走到这里就是页面销毁，会话跟着关，
+        // 登记也要清掉，主机列表上的悬浮卡片才不会变成死按钮。
+        SessionRegistry.clearIf(this);
         if (session != null) session.close();
         super.onDestroy();
     }
