@@ -1,9 +1,10 @@
 name: Android CI
 
 # 推到 GitHub 后无需任何配置即可编译：
-# - push / PR：自动编译 Debug + Release，并在 Actions 页面提供 APK 下载
-# - 推送 v* 标签 / 推送到主分支 / 手动勾选发布：自动创建或更新 GitHub Release 并附上两个 APK
+# - push 到 main / master、推送 v* 标签、手动运行：编译并自动创建/更新 GitHub Release
+# - PR：只编译并上传 Artifact，不发布 Release
 # 版本号唯一来源：app/build.gradle.kts 的 versionCode / versionName。
+# 每次构建自动读取，产物名与 Release 附件都会带上该版本号。
 on:
   push:
     branches: [main, master]
@@ -11,17 +12,14 @@ on:
   pull_request:
     branches: [main, master]
   workflow_dispatch:
-    inputs:
-      publish_release:
-        description: '同时创建 GitHub Release 并附上 APK（无需打标签）'
-        type: boolean
-        required: false
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  # 只有 PR 的新提交会取消同组旧运行；push 与手动触发各自排队，
+  # 避免连续操作时把正在跑的运行取消（表现为 "The operation was canceled."）
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# 常规构建最小权限；只有发版 job 单独提权到 contents: write
 permissions:
   contents: read
 
@@ -45,8 +43,13 @@ jobs:
       - name: 准备 Gradle（wrapper 校验 + 依赖缓存）
         uses: gradle/actions/setup-gradle@v4
         with:
+          # PR 只读缓存，避免未合并代码污染主干缓存
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
+      # 不用 android-actions/setup-android：v3 的 packages 默认是
+      # "tools platform-tools"，legacy tools 包已被 Google 下架，会在这一步
+      # 直接报 "Failed to find package 'tools'" 并退出 1。
+      # ubuntu-latest 自带 Android SDK，定位预装的 sdkmanager 即可。
       - name: 定位 Android SDK 与 sdkmanager
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
@@ -62,6 +65,9 @@ jobs:
             exit 1
           fi
           chmod +x "$SDKMGR" 2>/dev/null || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "sdkmanager=$SDKMGR"
+          "$SDKMGR" --sdk_root="$ANDROID_HOME" --version
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "SDKMGR=$SDKMGR" >> "$GITHUB_ENV"
@@ -71,15 +77,30 @@ jobs:
           yes 2>/dev/null | "$SDKMGR" --sdk_root="$ANDROID_HOME" --licenses > /dev/null 2>&1 || true
           "$SDKMGR" --sdk_root="$ANDROID_HOME" --install \
             "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          echo "=== 已安装的关键包 ==="
+          "$SDKMGR" --sdk_root="$ANDROID_HOME" --list_installed \
+            | grep -E "platforms;android-36|build-tools;36.0.0|platform-tools" || true
 
       - name: 确认 gradlew 可执行
         run: chmod +x gradlew
 
+      - name: 固定 debug 签名
+        run: |
+          # runner 每次全新，AGP 默认会现生成 debug.keystore，导致每次签名不同、
+          # 手机上无法覆盖安装。用仓库内固定的调试密钥覆盖默认路径。
+          mkdir -p "$HOME/.android"
+          base64 -d app/debug.keystore.base64 > "$HOME/.android/debug.keystore"
+
+      - name: 打印构建环境
+        run: |
+          java -version
+          ./gradlew --version
+
       - name: 读取版本号
         id: version
         run: |
-          V=$(sed -n 's/.*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
-          C=$(sed -n 's/.*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
+          V=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          C=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
           if [ -z "$V" ] || [ -z "$C" ]; then
             echo "::error::未能从 app/build.gradle.kts 读取 versionName / versionCode"
             exit 1
@@ -100,24 +121,21 @@ jobs:
       - name: 编译 Debug / Release
         run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
 
+      - name: 校验 debug 签名指纹
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs \
+            app/build/outputs/apk/debug/app-debug.apk | grep -i "SHA-256"
+
       - name: 归档带版本号的 APK
         run: |
           V="${{ steps.version.outputs.name }}"
           mkdir -p dist
-          cp app/build/outputs/apk/debug/*.apk "dist/OneSSH-${V}-debug.apk"
-          
-          # 兼容已签名 (app-release.apk) 和未签名 (app-release-unsigned.apk) 两种产物
-          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          if [[ "$RELEASE_APK" == *"-unsigned.apk" ]]; then
-            cp "$RELEASE_APK" "dist/OneSSH-${V}-release-unsigned.apk"
-          else
-            cp "$RELEASE_APK" "dist/OneSSH-${V}-release.apk"
-          fi
-          
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/OneSSH-${V}-debug.apk"
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "dist/OneSSH-${V}-release-unsigned.apk"
           ls -lh dist
           sha256sum dist/*.apk
 
-      - name: 上传 Debug APK
+      - name: 上传 Debug APK（可直接安装）
         uses: actions/upload-artifact@v4
         with:
           name: OneSSH-${{ steps.version.outputs.name }}-debug
@@ -125,25 +143,18 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: 上传 Release APK
+      - name: 上传 Release APK（未签名）
         uses: actions/upload-artifact@v4
         with:
-          name: OneSSH-${{ steps.version.outputs.name }}-release
-          path: dist/*-release*.apk
+          name: OneSSH-${{ steps.version.outputs.name }}-release-unsigned
+          path: dist/*-release-unsigned.apk
           if-no-files-found: error
           retention-days: 30
 
   release:
     name: 发布 Release
-    # 触发条件：
-    # 1. 推送 v* 标签
-    # 2. 推送代码到 main 或 master 分支（如不想每次 push 都发版，请删除下面这行中的 main/master 判断）
-    # 3. 手动触发且勾选了 publish_release
-    if: >
-      startsWith(github.ref, 'refs/tags/v') ||
-      github.ref == 'refs/heads/main' ||
-      github.ref == 'refs/heads/master' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+    # PR 只编译；push / 标签 / 手动运行都会创建或更新 Release
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -155,12 +166,11 @@ jobs:
         with:
           path: artifacts
 
-      - name: 创建或更新 GitHub Release
+      - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.build.outputs.version) }}
           name: OneSSH ${{ needs.build.outputs.version }}
           generate_release_notes: true
-          fail_on_unmatched_files: true
           files: |
             artifacts/**/*.apk
