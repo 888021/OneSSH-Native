@@ -21,8 +21,10 @@ on:
         default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  # 只有 PR 的新提交会取消同组旧运行；push 与手动触发各自排队，
+  # 避免连续操作时把正在跑的运行取消（表现为 "The operation was canceled."）
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # 常规构建最小权限；只有发版 job 单独提权到 contents: write
 permissions:
@@ -150,6 +152,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
