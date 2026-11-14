@@ -1,0 +1,33 @@
+# Gradle / 构建产物
+.gradle/
+build/
+*/build/
+!gradle/wrapper/gradle-wrapper.jar
+.cxx/
+captures/
+output.json
+
+# 本机环境（每台机器路径不同，绝不入库）
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# 签名密钥与发布产物（请自备 keystore，切勿提交到公开仓库）
+*.jks
+*.keystore
+keystore/
+/dist/
+*.apk
+*.apk.idsig
+*.aab
+
+# 日志
+*.log
