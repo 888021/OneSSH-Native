@@ -1,16 +1,9 @@
 name: Android CI
 
-# 使用说明：
-# - 每次 push 到 main/master：自动编译 Debug + Release，并根据下方 AUTO_RELEASE_ON_PUSH 开关自动发布到 GitHub Release
-# - 推送 v* 标签：强制自动创建 GitHub Release 并附上两个 APK
-# - 手动 Run workflow：可手动触发构建并发布 Release
+# 推到 GitHub 后无需任何配置即可编译：
+# - push / PR：自动编译 Debug + Release，并在 Actions 页面提供 APK 下载
+# - 推送 v* 标签 / 推送到主分支 / 手动勾选发布：自动创建或更新 GitHub Release 并附上两个 APK
 # 版本号唯一来源：app/build.gradle.kts 的 versionCode / versionName。
-
-env:
-  # 设为 'true'：每次 push 到 main/master 都会自动推送到 GitHub Release（同版本号会自动覆盖更新附件）
-  # 设为 'false'：仅在推送 v* 标签或手动勾选时才创建 Release
-  AUTO_RELEASE_ON_PUSH: 'true'
-
 on:
   push:
     branches: [main, master]
@@ -23,7 +16,7 @@ on:
         description: '同时创建 GitHub Release 并附上 APK（无需打标签）'
         type: boolean
         required: false
-        default: true
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -69,9 +62,6 @@ jobs:
             exit 1
           fi
           chmod +x "$SDKMGR" 2>/dev/null || true
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "sdkmanager=$SDKMGR"
-          "$SDKMGR" --sdk_root="$ANDROID_HOME" --version
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "SDKMGR=$SDKMGR" >> "$GITHUB_ENV"
@@ -81,23 +71,15 @@ jobs:
           yes 2>/dev/null | "$SDKMGR" --sdk_root="$ANDROID_HOME" --licenses > /dev/null 2>&1 || true
           "$SDKMGR" --sdk_root="$ANDROID_HOME" --install \
             "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-          echo "=== 已安装的关键包 ==="
-          "$SDKMGR" --sdk_root="$ANDROID_HOME" --list_installed \
-            | grep -E "platforms;android-36|build-tools;36.0.0|platform-tools" || true
 
       - name: 确认 gradlew 可执行
         run: chmod +x gradlew
 
-      - name: 打印构建环境
-        run: |
-          java -version
-          ./gradlew --version
-
       - name: 读取版本号
         id: version
         run: |
-          V=$(sed -nE 's/.*versionName[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/p' app/build.gradle.kts | head -1)
-          C=$(sed -nE 's/.*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -1)
+          V=$(sed -n 's/.*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          C=$(sed -n 's/.*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
           if [ -z "$V" ] || [ -z "$C" ]; then
             echo "::error::未能从 app/build.gradle.kts 读取 versionName / versionCode"
             exit 1
@@ -122,31 +104,20 @@ jobs:
         run: |
           V="${{ steps.version.outputs.name }}"
           mkdir -p dist
-
-          # 复制 Debug APK
-          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
-          if [ -z "$DEBUG_APK" ]; then
-            echo "::error::未找到编译生成的 Debug APK"
-            exit 1
-          fi
-          cp "$DEBUG_APK" "dist/OneSSH-${V}-debug.apk"
-
-          # 复制 Release APK（自动兼容未签名 -unsigned.apk 与已签名 .apk）
-          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
-          if [ -z "$RELEASE_APK" ]; then
-            echo "::error::未找到编译生成的 Release APK"
-            exit 1
-          fi
-          if [[ "$RELEASE_APK" == *-unsigned.apk ]]; then
+          cp app/build/outputs/apk/debug/*.apk "dist/OneSSH-${V}-debug.apk"
+          
+          # 兼容已签名 (app-release.apk) 和未签名 (app-release-unsigned.apk) 两种产物
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [[ "$RELEASE_APK" == *"-unsigned.apk" ]]; then
             cp "$RELEASE_APK" "dist/OneSSH-${V}-release-unsigned.apk"
           else
             cp "$RELEASE_APK" "dist/OneSSH-${V}-release.apk"
           fi
-
+          
           ls -lh dist
           sha256sum dist/*.apk
 
-      - name: 上传 Debug APK（可直接安装）
+      - name: 上传 Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: OneSSH-${{ steps.version.outputs.name }}-debug
@@ -164,14 +135,15 @@ jobs:
 
   release:
     name: 发布 Release
-    # 满足以下任一条件即自动创建/更新 Release：
-    # 1. 推送了 v* 标签
-    # 2. 手动运行并勾选 publish_release
-    # 3. 推送到 main/master 分支且开启了 AUTO_RELEASE_ON_PUSH
-    if: >-
+    # 触发条件：
+    # 1. 推送 v* 标签
+    # 2. 推送代码到 main 或 master 分支（如不想每次 push 都发版，请删除下面这行中的 main/master 判断）
+    # 3. 手动触发且勾选了 publish_release
+    if: >
       startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') ||
-      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && env.AUTO_RELEASE_ON_PUSH == 'true')
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/master' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -189,6 +161,6 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.build.outputs.version) }}
           name: OneSSH ${{ needs.build.outputs.version }}
           generate_release_notes: true
-          make_latest: true
+          fail_on_unmatched_files: true
           files: |
             artifacts/**/*.apk
