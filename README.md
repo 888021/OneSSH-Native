@@ -58,9 +58,13 @@
 |---|---|
 | `push` 到 `main` / `master`、提交 PR | 编译 Debug + Release，Actions 页面提供 APK 下载（保留 30 天） |
 | 推送 `v*` 标签（如 `v2.0.0`） | 在上面基础上自动创建 GitHub Release，附上两个 APK |
-| Actions 页手动 `Run workflow` | 随时补一次构建 |
+| Actions 页手动 `Run workflow` | 随时补一次构建；勾选「同时创建 GitHub Release」可不打标签直接发版 |
 
-CI 环境：`ubuntu-latest` + Temurin JDK 21，自动安装 `platforms;android-36`、`build-tools;36.0.0`、`platform-tools`，Gradle 发行版与依赖带缓存。产物在 **Actions → 对应 run → Artifacts** 下载：`OneSSH-debug` 可直接安装，`OneSSH-release-unsigned` 需先签名（见下）。
+CI 环境：`ubuntu-latest` + Temurin JDK 21，自动安装 `platforms;android-36`、`build-tools;36.0.0`、`platform-tools`，Gradle 发行版与依赖带缓存。产物在 **Actions → 对应 run → Artifacts** 下载，名字带版本号（如 `OneSSH-2.0.0-debug`），其中 Debug 可直接安装、Release 需先签名（见下）。
+
+> ℹ️ 普通 `push` / PR 时，「发布 Release」这个 job 会显示 **skipped**，这是正常的 —— 它只在推送 `v*` 标签、或手动运行并勾选发版时执行。APK 不受影响，到 **Actions → 对应 run → Summary 底部 Artifacts** 下载即可（保留 30 天）。
+
+> ⚠️ 不要再加 `android-actions/setup-android@v3`：它默认安装已被 Google 下架的 legacy `tools` 包，会在 SDK 准备阶段报 `Failed to find package 'tools'` 并以退出码 1 失败。本流水线直接定位 runner 预装的 SDK 与 `sdkmanager`，不依赖该 action。
 
 首次上传（如尚未建仓）：
 
@@ -74,6 +78,24 @@ git push -u origin main
 ```
 
 > Fork 后同样零配置，只需在 fork 仓库的 Actions 页面启用 workflows。流水线不写死账号、包名或路径，改仓库名不影响构建。
+
+### 🏷️ 只改版本号就能编译发版
+
+版本号只有一个来源：`app/build.gradle.kts` 里的 `versionCode` / `versionName`（当前 `2` / `2.0.0`）。CI 每次构建都会读取它，把 APK 归档为 `OneSSH-<版本>-debug.apk` 与 `OneSSH-<版本>-release-unsigned.apk`，上传的 Artifact 与 GitHub Release 附件也都带这个版本号；打标签时若 `v*` 与 `versionName` 不一致，日志里会给出警告。
+
+```bash
+# 1) 改 app/build.gradle.kts 里的 versionCode / versionName
+#    （顺手同步本文件顶部的「版本」一行）
+# 2) 提交推送 —— 自动编译
+git add app/build.gradle.kts README.md && git commit -m "chore: bump version to 2.0.1" && git push
+
+# 3) 打同名标签 —— 自动创建 GitHub Release 并附上带版本号的 APK
+git tag v2.0.1 && git push origin v2.0.1
+```
+
+> **不是只有改版本号才编译**：任何 `push` 到 `main` / `master`、任何 PR、以及手动 `Run workflow` 都会编译，改版本号只是最普通的一次 push。
+>
+> **只在网页上操作、不方便打标签？** 打开 **Actions → Android CI → Run workflow**，勾选「同时创建 GitHub Release」再运行：流水线会按当前 `versionName` 自动创建 `v<版本>` 标签与 Release，并附上两个带版本号的 APK，全程不用本地 git。
 
 ### 💻 本地构建
 
