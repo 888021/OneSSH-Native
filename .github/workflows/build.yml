@@ -1,11 +1,16 @@
 name: Android CI
 
-# 推到 GitHub 后无需任何配置即可编译：
-# - push / PR：自动编译 Debug + Release，并在 Actions 页面提供 APK 下载
-# - 推送 v* 标签：额外自动创建 GitHub Release 并附上两个 APK
-# - 手动 Run workflow：可选勾选「同时创建 GitHub Release」，无需打标签即可发版
+# 使用说明：
+# - 每次 push 到 main/master：自动编译 Debug + Release，并根据下方 AUTO_RELEASE_ON_PUSH 开关自动发布到 GitHub Release
+# - 推送 v* 标签：强制自动创建 GitHub Release 并附上两个 APK
+# - 手动 Run workflow：可手动触发构建并发布 Release
 # 版本号唯一来源：app/build.gradle.kts 的 versionCode / versionName。
-# 每次构建自动读取，产物名与 Release 附件都会带上该版本号。
+
+env:
+  # 设为 'true'：每次 push 到 main/master 都会自动推送到 GitHub Release（同版本号会自动覆盖更新附件）
+  # 设为 'false'：仅在推送 v* 标签或手动勾选时才创建 Release
+  AUTO_RELEASE_ON_PUSH: 'true'
+
 on:
   push:
     branches: [main, master]
@@ -18,15 +23,12 @@ on:
         description: '同时创建 GitHub Release 并附上 APK（无需打标签）'
         type: boolean
         required: false
-        default: false
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  # 只有 PR 的新提交会取消同组旧运行；push 与手动触发各自排队，
-  # 避免连续操作时把正在跑的运行取消（表现为 "The operation was canceled."）
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# 常规构建最小权限；只有发版 job 单独提权到 contents: write
 permissions:
   contents: read
 
@@ -50,13 +52,8 @@ jobs:
       - name: 准备 Gradle（wrapper 校验 + 依赖缓存）
         uses: gradle/actions/setup-gradle@v4
         with:
-          # PR 只读缓存，避免未合并代码污染主干缓存
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
-      # 不用 android-actions/setup-android：v3 的 packages 默认是
-      # "tools platform-tools"，legacy tools 包已被 Google 下架，会在这一步
-      # 直接报 "Failed to find package 'tools'" 并退出 1。
-      # ubuntu-latest 自带 Android SDK，定位预装的 sdkmanager 即可。
       - name: 定位 Android SDK 与 sdkmanager
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
@@ -99,8 +96,8 @@ jobs:
       - name: 读取版本号
         id: version
         run: |
-          V=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
-          C=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
+          V=$(sed -nE 's/.*versionName[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/p' app/build.gradle.kts | head -1)
+          C=$(sed -nE 's/.*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -1)
           if [ -z "$V" ] || [ -z "$C" ]; then
             echo "::error::未能从 app/build.gradle.kts 读取 versionName / versionCode"
             exit 1
@@ -125,8 +122,27 @@ jobs:
         run: |
           V="${{ steps.version.outputs.name }}"
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/OneSSH-${V}-debug.apk"
-          cp app/build/outputs/apk/release/app-release-unsigned.apk "dist/OneSSH-${V}-release-unsigned.apk"
+
+          # 复制 Debug APK
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          if [ -z "$DEBUG_APK" ]; then
+            echo "::error::未找到编译生成的 Debug APK"
+            exit 1
+          fi
+          cp "$DEBUG_APK" "dist/OneSSH-${V}-debug.apk"
+
+          # 复制 Release APK（自动兼容未签名 -unsigned.apk 与已签名 .apk）
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          if [ -z "$RELEASE_APK" ]; then
+            echo "::error::未找到编译生成的 Release APK"
+            exit 1
+          fi
+          if [[ "$RELEASE_APK" == *-unsigned.apk ]]; then
+            cp "$RELEASE_APK" "dist/OneSSH-${V}-release-unsigned.apk"
+          else
+            cp "$RELEASE_APK" "dist/OneSSH-${V}-release.apk"
+          fi
+
           ls -lh dist
           sha256sum dist/*.apk
 
@@ -138,18 +154,24 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: 上传 Release APK（未签名）
+      - name: 上传 Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: OneSSH-${{ steps.version.outputs.name }}-release-unsigned
-          path: dist/*-release-unsigned.apk
+          name: OneSSH-${{ steps.version.outputs.name }}-release
+          path: dist/*-release*.apk
           if-no-files-found: error
           retention-days: 30
 
   release:
     name: 发布 Release
-    # 只有 v* 标签，或手动运行时勾选了 publish_release，才创建 Release
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+    # 满足以下任一条件即自动创建/更新 Release：
+    # 1. 推送了 v* 标签
+    # 2. 手动运行并勾选 publish_release
+    # 3. 推送到 main/master 分支且开启了 AUTO_RELEASE_ON_PUSH
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && env.AUTO_RELEASE_ON_PUSH == 'true')
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -161,11 +183,12 @@ jobs:
         with:
           path: artifacts
 
-      - name: 创建 GitHub Release
+      - name: 创建或更新 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.build.outputs.version) }}
           name: OneSSH ${{ needs.build.outputs.version }}
           generate_release_notes: true
+          make_latest: true
           files: |
             artifacts/**/*.apk
