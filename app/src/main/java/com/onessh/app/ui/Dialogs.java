@@ -18,6 +18,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.util.function.BooleanSupplier;
+
 /** 对话框：纸色卡片、圆角、橙色主按钮，和网页版的 modal 一个调子。 */
 public final class Dialogs {
 
@@ -198,9 +200,24 @@ public final class Dialogs {
 
     /**
      * 自定义内容对话框。content 由调用方填充，返回值用于关闭。
+     * Runnable 版本：回调跑完就关闭。
      */
     public static Dialog custom(Context c, String title, String sub, View content,
                                 String okLabel, String cancelLabel, boolean danger, Runnable onOk) {
+        return custom(c, title, sub, content, okLabel, cancelLabel, danger,
+                () -> {
+                    if (onOk != null) onOk.run();
+                    return true;
+                });
+    }
+
+    /**
+     * 自定义内容对话框（可拦关闭）。回调返回 false 时不关闭，
+     * 用于表单校验失败时把已填内容留在弹窗里。
+     */
+    public static Dialog custom(Context c, String title, String sub, View content,
+                                String okLabel, String cancelLabel, boolean danger,
+                                BooleanSupplier onOk) {
         Dialog d = make(c);
         LinearLayout box = card(c);
         title(c, box, title, sub);
@@ -221,9 +238,9 @@ public final class Dialogs {
         }
         TextView ok = action(c, okLabel, danger ? UI.RED : UI.ACCENT, true);
         ok.setOnClickListener(v -> {
-            // 先执行回调再关闭：调用方可能在 dismiss 监听里等结果
-            if (onOk != null) onOk.run();
-            d.dismiss();
+            // 先执行回调再关闭：调用方可能在 dismiss 监听里等结果；
+            // 回调返回 false 表示校验没过，留在弹窗里不关闭
+            if (onOk == null || onOk.getAsBoolean()) d.dismiss();
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);

@@ -449,6 +449,16 @@ public final class TerminalBuffer {
         return sb.toString();
     }
 
+    /** 按“回滚区 + 当前屏”的统一行号取一行文本，越界返回 null；长按复制用 */
+    public String lineTextAt(int index) {
+        int sb = scrollbackSize();
+        if (index < 0) return null;
+        if (index < sb) return rowText(scrollbackAt(index));
+        int r = index - sb;
+        if (r < 0 || r >= rows) return null;
+        return rowText(lines[r]);
+    }
+
     private String rowText(Line l) {
         StringBuilder sb = new StringBuilder();
         int last = 0;
