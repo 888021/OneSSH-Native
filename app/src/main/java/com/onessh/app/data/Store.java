@@ -462,6 +462,19 @@ public final class Store {
         persist();
     }
 
+    /** 2.2.0 应用锁：打开 App 时用锁屏密码 / 指纹验证一次（见 MainActivity）。 */
+    public synchronized boolean appLock() {
+        return obj("settings").optBoolean("appLock", false);
+    }
+
+    public synchronized void setAppLock(boolean on) {
+        try {
+            obj("settings").put("appLock", on);
+        } catch (Exception ignored) {
+        }
+        persist();
+    }
+
     public synchronized boolean keepAwake() {
         return obj("settings").optBoolean("keepAwake", true);
     }
@@ -472,6 +485,46 @@ public final class Store {
         } catch (Exception ignored) {
         }
         persist();
+    }
+
+    /* ------------------------------------------------------- 备份 / 导入 */
+
+    /** 导出备份文件内容（带 onessh-backup 标记）；失败返回 null。 */
+    public synchronized String exportBackup() {
+        return Backup.wrap(root.toString());
+    }
+
+    /**
+     * 导入备份：用备份里的内容整体替换当前库，导入前请调用方先确认。
+     * 成功返回 true；格式不对返回 false，当前库不动。
+     * 注意：密码 / 私钥是 Keystore 密文，换设备后要重填，见 Backup 的说明。
+     */
+    public synchronized boolean importBackup(String text) {
+        String data = Backup.unwrap(text);
+        if (data == null) return false;
+        JSONObject incoming;
+        try {
+            incoming = new JSONObject(data);
+        } catch (Exception e) {
+            return false;
+        }
+        // 先校验：至少得是个对象，hosts / creds 等键如果存在必须是数组/对象
+        try {
+            java.util.Iterator<String> it = root.keys();
+            List<String> keys = new ArrayList<>();
+            while (it.hasNext()) keys.add(it.next());
+            for (String k : keys) root.remove(k);
+            java.util.Iterator<String> in = incoming.keys();
+            while (in.hasNext()) {
+                String k = in.next();
+                root.put(k, incoming.get(k));
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "导入备份失败", e);
+            return false;
+        }
+        persist();
+        return true;
     }
 
     public synchronized void clearAll() {
