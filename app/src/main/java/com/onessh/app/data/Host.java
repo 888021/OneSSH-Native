@@ -1,6 +1,10 @@
 package com.onessh.app.data;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /** 一台保存下来的主机。密码本身不在这里，只存密文。 */
 public class Host {
@@ -23,6 +27,33 @@ public class Host {
     public String keyId = "";
     /** 跳板机：先连这台，再从它转发到目标主机 */
     public String jumpId = "";
+    /**
+     * 多跳链：按顺序存跳板机 id，第一跳在前。2.1.0 新增。
+     * 为空时回退到单跳 {@link #jumpId}；不为空时以它为准，
+     * 每台跳板机自身的 jumpId 不再递归展开（防重复 / 防环）。
+     * 序列化为 JSON 数组字符串，例如 ["id1","id2"]。
+     */
+    public String jumpIds = "";
+
+    /** 按“第一跳在前”的顺序返回跳板机 id 链；没有跳板机返回空列表。 */
+    public List<String> jumpChainIds() {
+        List<String> out = new ArrayList<>();
+        if (jumpIds != null && !jumpIds.trim().isEmpty()) {
+            try {
+                JSONArray a = new JSONArray(jumpIds);
+                for (int i = 0; i < a.length(); i++) {
+                    String id = a.optString(i, "");
+                    if (id != null && !id.trim().isEmpty()) out.add(id);
+                }
+            } catch (Exception ignored) {
+                // 旧数据或手写损坏时回退到单跳
+                if (jumpId != null && !jumpId.trim().isEmpty()) out.add(jumpId);
+            }
+            return out;
+        }
+        if (jumpId != null && !jumpId.trim().isEmpty()) out.add(jumpId);
+        return out;
+    }
 
     public String passwordEnc = "";
     public String keyEnc = "";
@@ -56,6 +87,7 @@ public class Host {
             o.put("credId", credId);
             o.put("keyId", keyId);
             o.put("jumpId", jumpId);
+            o.put("jumpIds", jumpIds);
             o.put("passwordEnc", passwordEnc);
             o.put("keyEnc", keyEnc);
             o.put("passphraseEnc", passphraseEnc);
@@ -79,6 +111,7 @@ public class Host {
         h.credId = o.optString("credId", "");
         h.keyId = o.optString("keyId", "");
         h.jumpId = o.optString("jumpId", "");
+        h.jumpIds = o.optString("jumpIds", "");
         h.passwordEnc = o.optString("passwordEnc", "");
         h.keyEnc = o.optString("keyEnc", "");
         h.passphraseEnc = o.optString("passphraseEnc", "");

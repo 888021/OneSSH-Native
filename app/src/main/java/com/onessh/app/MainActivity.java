@@ -529,9 +529,17 @@ public class MainActivity extends Activity {
         main.addView(name);
 
         String subText = h.subtitle();
-        if (h.jumpId != null && !h.jumpId.isEmpty()) {
-            Host jump = store.host(h.jumpId);
-            if (jump != null) subText = subText + " · 经 " + jump.label();
+        // 2.1.0：多跳时显示整条链，例如“经 跳板A → 跳板B”；单跳时与旧版一致
+        java.util.List<String> chainIds = h.jumpChainIds();
+        if (!chainIds.isEmpty()) {
+            StringBuilder chain = new StringBuilder();
+            for (String jumpId : chainIds) {
+                Host jump = store.host(jumpId);
+                if (jump == null) continue;
+                if (chain.length() > 0) chain.append(" → ");
+                chain.append(jump.label());
+            }
+            if (chain.length() > 0) subText = subText + " · 经 " + chain;
         }
         TextView sub = UI.mono(this, subText, 11.5f, UI.MUTED);
         sub.setSingleLine(true);

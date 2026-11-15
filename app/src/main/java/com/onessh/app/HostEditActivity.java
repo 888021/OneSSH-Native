@@ -66,8 +66,11 @@ public class HostEditActivity extends Activity {
             creating = true;
         }
         authType = draft.authType == null ? Host.AUTH_PASSWORD : draft.authType;
-        // 跳板机被删了就当作没设置
-        if (!draft.jumpId.isEmpty() && store.host(draft.jumpId) == null) draft.jumpId = "";
+        // 跳板机被删了就当作没设置（单跳和多跳链一起清）
+        if (!draft.jumpId.isEmpty() && store.host(draft.jumpId) == null) {
+            draft.jumpId = "";
+            draft.jumpIds = "";
+        }
 
         LinearLayout root = Widgets.screen(this);
 

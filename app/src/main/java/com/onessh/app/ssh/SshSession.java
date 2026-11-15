@@ -20,8 +20,12 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * 一条 SSH 连接：密码 / 公钥 / keyboard-interactive 认证，PTY shell，外加一条 SFTP 通道。
@@ -47,6 +51,9 @@ public final class SshSession {
         boolean verify(String hostPort, String fingerprint, String knownFingerprint);
     }
 
+    /** 跳板机链最多 5 级：再多基本是配错 / 环路，直接拒绝比无限连下去好。 */
+    public static final int MAX_JUMPS = 5;
+
     public static final class Config {
         public String host;
         public int port = 22;
@@ -56,21 +63,65 @@ public final class SshSession {
         public String passphrase;
         public int cols = 80;
         public int rows = 24;
-        /** 跳板机配置；为 null 表示直连 */
+        /** 跳板机配置；为 null 表示直连（2.0.0 单跳，向后兼容） */
         public Config jump;
+        /**
+         * 多跳链：按“第一跳在前”的顺序。2.1.0 新增。
+         * 不为空时以它为准，{@link #jump} 只保留第一跳供旧代码读；
+         * 为空时回退到单跳 {@link #jump}。
+         */
+        public List<Config> jumps;
+
+        /** 按“第一跳在前”返回有效的跳板机链；没有跳板机返回空列表。 */
+        public List<Config> effectiveJumps() {
+            if (jumps != null && !jumps.isEmpty()) return jumps;
+            if (jump != null) {
+                List<Config> one = new ArrayList<>();
+                one.add(jump);
+                return one;
+            }
+            return new ArrayList<>();
+        }
 
         public String hostPort() {
             return SshSession.hostPort(host, port);
         }
     }
 
-    /** 从保存的主机生成连接参数（含跳板机） */
+    /** 从保存的主机生成连接参数（含跳板机链） */
     public static Config fromHost(com.onessh.app.data.Store store,
                                   com.onessh.app.data.Host h) {
         Config c = fill(store, h);
-        if (h.jumpId != null && !h.jumpId.isEmpty() && !h.jumpId.equals(h.id)) {
-            com.onessh.app.data.Host j = store.host(h.jumpId);
-            if (j != null) c.jump = fill(store, j);
+        List<Config> chain = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        seen.add(h.id);
+        List<String> ids = h.jumpChainIds();
+        if (ids.size() > 1 || (ids.size() == 1 && h.jumpIds != null && !h.jumpIds.trim().isEmpty())) {
+            // 2.1.0 新格式：jumpIds 已是完整链，直接按顺序解析，不再递归展开
+            for (String id : ids) {
+                if (chain.size() >= MAX_JUMPS) break;
+                if (id == null || id.isEmpty() || !seen.add(id)) continue;
+                com.onessh.app.data.Host j = store.host(id);
+                if (j == null) break;
+                chain.add(fill(store, j));
+            }
+        } else if (!ids.isEmpty()) {
+            // 旧格式：只有 jumpId，沿 jumpId 链往上走（目标 → 跳板 → 跳板的跳板…），
+            // 再反转成“第一跳在前”。遇环 / 缺失 / 超 5 级就停。
+            List<Config> reversed = new ArrayList<>();
+            String nextId = ids.get(0);
+            while (nextId != null && !nextId.isEmpty() && reversed.size() < MAX_JUMPS) {
+                if (!seen.add(nextId)) break;
+                com.onessh.app.data.Host j = store.host(nextId);
+                if (j == null) break;
+                reversed.add(fill(store, j));
+                nextId = j.jumpId;
+            }
+            for (int i = reversed.size() - 1; i >= 0; i--) chain.add(reversed.get(i));
+        }
+        if (!chain.isEmpty()) {
+            c.jumps = chain;
+            c.jump = chain.get(0);
         }
         return c;
     }
@@ -103,6 +154,21 @@ public final class SshSession {
     private JSch jumpJsch;
     private Session session;
     private Session jumpSession;
+    /** 多跳时每一级跳板机的 Session（第一跳在前），jumpSession 恒等于最后一级。 */
+    private final List<Session> jumpSessions = new ArrayList<>();
+    private final List<JSch> jumpJschs = new ArrayList<>();
+
+    /** 某一跳板机到下一跳的转发方式（direct-tcpip / 命令隧道）。 */
+    private static final class HopTunnel {
+        final JumpMode mode;
+        final String tool;
+        final String command;
+        HopTunnel(JumpMode mode, String tool, String command) {
+            this.mode = mode;
+            this.tool = tool;
+            this.command = command;
+        }
+    }
     private ChannelShell shell;
     private OutputStream out;
     private Thread reader;
@@ -135,9 +201,12 @@ public final class SshSession {
     public void connect() {
         listener.onState("connecting", null);
         try {
-            if (cfg.jump != null) {
-                listener.onState("connecting", "正在连接跳板机…");
-                connectJump();
+            if (!cfg.effectiveJumps().isEmpty()) {
+                if (cfg.effectiveJumps().size() > MAX_JUMPS) {
+                    throw new JSchException("跳板机链最多 " + MAX_JUMPS + " 级，当前 "
+                            + cfg.effectiveJumps().size() + " 级，请检查跳板机配置是否成环");
+                }
+                connectJumpChain();
             }
 
             jsch = new JSch();
@@ -193,25 +262,62 @@ public final class SshSession {
         }
     }
 
-    /** 先把跳板机连上，后面目标主机的 socket 从它转发 */
-    private void connectJump() throws JSchException {
-        Config j = cfg.jump;
-        jumpJsch = new JSch();
-        if (j.privateKey != null && !j.privateKey.trim().isEmpty()) {
-            byte[] pass = j.passphrase == null || j.passphrase.isEmpty()
-                    ? null : j.passphrase.getBytes(StandardCharsets.UTF_8);
-            jumpJsch.addIdentity("jumpkey", j.privateKey.getBytes(StandardCharsets.UTF_8), null, pass);
+    /** 先把跳板机链逐级连上，后面目标主机的 socket 从最后一级转发 */
+    private void connectJumpChain() throws JSchException {
+        List<Config> hops = cfg.effectiveJumps();
+        Session prevSession = null;
+        HopTunnel prevTunnel = null;
+        for (int i = 0; i < hops.size(); i++) {
+            Config hopCfg = hops.get(i);
+            String nextHost = (i + 1 < hops.size()) ? hops.get(i + 1).host : cfg.host;
+            int nextPort = (i + 1 < hops.size()) ? hops.get(i + 1).port : cfg.port;
+            listener.onState("connecting", "正在连接跳板机 " + (i + 1) + "/" + hops.size()
+                    + "（" + hopCfg.hostPort() + "）…");
+
+            JSch hopJsch = new JSch();
+            if (hopCfg.privateKey != null && !hopCfg.privateKey.trim().isEmpty()) {
+                byte[] pass = hopCfg.passphrase == null || hopCfg.passphrase.isEmpty()
+                        ? null : hopCfg.passphrase.getBytes(StandardCharsets.UTF_8);
+                hopJsch.addIdentity("jumpkey-" + i, hopCfg.privateKey.getBytes(StandardCharsets.UTF_8), null, pass);
+            }
+            hopJsch.setHostKeyRepository(new StoreHostKeys(hopCfg.hostPort()));
+
+            Session hopSession = hopJsch.getSession(hopCfg.user, hopCfg.host, hopCfg.port);
+            hopSession.setConfig(buildConfig());
+            hopSession.setUserInfo(new Prompt(hopCfg));
+            if (hopCfg.password != null) hopSession.setPassword(hopCfg.password);
+            if (prevSession != null) {
+                // 这一跳的 TCP 改走上一跳的转发通道
+                hopSession.setSocketFactory(new JumpSocketFactory(prevSession, prevTunnel));
+            }
+            hopSession.setServerAliveInterval(30000);
+            try {
+                hopSession.connect(20000);
+            } catch (JSchException e) {
+                throw new JSchException("跳板机 " + (i + 1) + "/" + hops.size()
+                        + "（" + hopCfg.hostPort() + "）连不上：" + e.getMessage(), e);
+            }
+            jumpJschs.add(hopJsch);
+            jumpSessions.add(hopSession);
+            if (i == 0) jumpJsch = hopJsch;
+
+            // 这一跳到下一跳的转发方式：先试 direct-tcpip，不行再试命令隧道
+            HopTunnel tunnel = prepareTunnel(hopSession, nextHost, nextPort, i + 1, hops.size());
+            prevTunnel = tunnel;
+            prevSession = hopSession;
         }
-        jumpJsch.setHostKeyRepository(new StoreHostKeys(j.hostPort()));
+        // 最后一级就是目标主机要走的跳板机，保持旧字段供目标连接 / 报错用
+        jumpSession = prevSession;
+        if (prevTunnel != null) {
+            jumpMode = prevTunnel.mode;
+            jumpTool = prevTunnel.tool;
+            jumpCommand = prevTunnel.command;
+        }
+    }
 
-        jumpSession = jumpJsch.getSession(j.user, j.host, j.port);
-        jumpSession.setConfig(buildConfig());
-        jumpSession.setUserInfo(new Prompt(j));
-        if (j.password != null) jumpSession.setPassword(j.password);
-        jumpSession.setServerAliveInterval(30000);
-        jumpSession.connect(20000);
-
-        prepareTunnel();
+    /** 兼容旧单跳入口：等价于只有一级的 connectJumpChain()。 */
+    private void connectJump() throws JSchException {
+        connectJumpChain();
     }
 
     /**
@@ -219,28 +325,28 @@ public final class SshSession {
      * 在跳板机上跑 nc/ncat/socat，把它连出去的那条 TCP 直接当隧道用。
      * 这条路只需要跳板机有 nc，不需要 sshd 开端口转发。
      */
-    private void prepareTunnel() throws JSchException {
-        if (canDirectTcpip(cfg.host, cfg.port)) {
-            jumpMode = JumpMode.DIRECT;
-            return;
+    private HopTunnel prepareTunnel(Session hopSession, String targetHost, int targetPort,
+                                    int hopIndex, int hopCount) throws JSchException {
+        if (canDirectTcpip(hopSession, targetHost, targetPort)) {
+            return new HopTunnel(JumpMode.DIRECT, null, null);
         }
 
-        listener.onState("connecting", "跳板机不允许端口转发，改用命令隧道…");
+        listener.onState("connecting", "跳板机 " + hopIndex + "/" + hopCount
+                + " 不允许端口转发，改用命令隧道…");
 
-        String tool = detectTunnelTool();
+        String tool = detectTunnelTool(hopSession);
         if (tool == null) {
-            throw new JSchException("跳板机既不允许端口转发，也没装 nc / ncat / socat。"
+            throw new JSchException("跳板机 " + hopIndex + "/" + hopCount
+                    + "（" + hopSession.getHost() + "）既不允许端口转发，也没装 nc / ncat / socat。"
                     + "可以在跳板机执行 apk add netcat-openbsd，"
                     + "或者把 sshd_config 里的 AllowTcpForwarding 改成 yes");
         }
-        jumpMode = JumpMode.EXEC;
-        jumpTool = tool;
-        jumpCommand = tunnelCommand(tool, cfg.host, cfg.port);
+        return new HopTunnel(JumpMode.EXEC, tool, tunnelCommand(tool, targetHost, targetPort));
     }
 
-    private boolean canDirectTcpip(String host, int port) {
+    private boolean canDirectTcpip(Session hopSession, String host, int port) {
         try {
-            ChannelDirectTCPIP ch = (ChannelDirectTCPIP) jumpSession.openChannel("direct-tcpip");
+            ChannelDirectTCPIP ch = (ChannelDirectTCPIP) hopSession.openChannel("direct-tcpip");
             ch.setHost(host);
             ch.setPort(port);
             ch.setOrgIPAddress("127.0.0.1");
@@ -254,8 +360,8 @@ public final class SshSession {
     }
 
     /** 看看跳板机上有什么可用的管道工具 */
-    private String detectTunnelTool() {
-        String out = runOnJump("command -v nc; command -v ncat; command -v socat");
+    private String detectTunnelTool(Session hopSession) {
+        String out = runOnJump(hopSession, "command -v nc; command -v ncat; command -v socat");
         if (out.contains("socat")) return "socat";
         if (out.contains("ncat")) return "ncat";
         if (out.contains("nc")) return "nc";
@@ -268,10 +374,10 @@ public final class SshSession {
     }
 
     /** 在跳板机上跑一条命令并收集输出（最多等 4 秒） */
-    private String runOnJump(String command) {
+    private String runOnJump(Session hopSession, String command) {
         ChannelExec ex = null;
         try {
-            ex = (ChannelExec) jumpSession.openChannel("exec");
+            ex = (ChannelExec) hopSession.openChannel("exec");
             ex.setCommand(command);
             InputStream in = ex.getInputStream();
             ex.connect(5000);
@@ -310,20 +416,28 @@ public final class SshSession {
      */
     private final class JumpSocketFactory implements SocketFactory {
         private final Session jump;
+        private final HopTunnel tunnel;
         private final Socket placeholder = new Socket();
         private InputStream in;
         private OutputStream out;
 
+        /** 目标主机走最后一级跳板机：用全局 jumpMode / jumpCommand（向后兼容）。 */
         JumpSocketFactory(Session jump) {
+            this(jump, new HopTunnel(jumpMode, jumpTool, jumpCommand));
+        }
+
+        /** 多跳：每一跳走上一跳时，用上一跳自己的转发方式。 */
+        JumpSocketFactory(Session jump, HopTunnel tunnel) {
             this.jump = jump;
+            this.tunnel = tunnel != null ? tunnel : new HopTunnel(JumpMode.DIRECT, null, null);
         }
 
         @Override
         public Socket createSocket(String host, int port) throws IOException {
             try {
-                if (jumpMode == JumpMode.EXEC) {
+                if (tunnel.mode == JumpMode.EXEC) {
                     ChannelExec ex = (ChannelExec) jump.openChannel("exec");
-                    ex.setCommand(jumpCommand);
+                    ex.setCommand(tunnel.command);
                     in = ex.getInputStream();
                     out = ex.getOutputStream();
                     ex.connect(10000);
@@ -338,13 +452,13 @@ public final class SshSession {
                     out = ch.getOutputStream();
                 }
                 return placeholder;
-            } catch (Exception e) {
-                String m = e.getMessage() == null ? "" : e.getMessage();
+            } catch (Exception ex) {
+                String m = ex.getMessage() == null ? "" : ex.getMessage();
                 if (m.contains("channel is not opened") || m.contains("open failed")) {
                     m = "跳板机连不到 " + host + ":" + port
                             + "，请在跳板机上执行 nc -vz " + host + " " + port + " 确认网络";
                 }
-                throw new IOException("跳板机转发失败：" + m, e);
+                throw new IOException("跳板机转发失败：" + m, ex);
             }
         }
 
@@ -453,7 +567,12 @@ public final class SshSession {
         final ChannelShell ch = shell;
         final Session s = session;
         final Session js = jumpSession;
+        // 多跳：把每一级跳板机 Session 都记下来一起断开
+        final java.util.List<Session> allJumps = new java.util.ArrayList<>(jumpSessions);
+        if (js != null && !allJumps.contains(js)) allJumps.add(js);
         jumpSession = null;
+        jumpSessions.clear();
+        jumpJschs.clear();
         shell = null;
         session = null;
         out = null;
@@ -472,9 +591,11 @@ public final class SshSession {
                 if (s != null) s.disconnect();
             } catch (Exception ignored) {
             }
-            try {
-                if (js != null) js.disconnect();
-            } catch (Exception ignored) {
+            for (Session hopSession : allJumps) {
+                try {
+                    if (hopSession != null) hopSession.disconnect();
+                } catch (Exception ignored) {
+                }
             }
         }, "ssh-close");
         t.setDaemon(true);
