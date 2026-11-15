@@ -14,6 +14,7 @@ import android.widget.TextView;
 import com.onessh.app.data.Credential;
 import com.onessh.app.data.Crypto;
 import com.onessh.app.data.Host;
+import com.onessh.app.data.JumpChain;
 import com.onessh.app.data.KeyItem;
 import com.onessh.app.data.Store;
 import com.onessh.app.ui.Dialogs;
@@ -66,11 +67,11 @@ public class HostEditActivity extends Activity {
             creating = true;
         }
         authType = draft.authType == null ? Host.AUTH_PASSWORD : draft.authType;
-        // 跳板机被删了就当作没设置（单跳和多跳链一起清）
-        if (!draft.jumpId.isEmpty() && store.host(draft.jumpId) == null) {
-            draft.jumpId = "";
-            draft.jumpIds = "";
-        }
+        // 2.2.0：跳板链里被删的主机逐个清掉，只清掉的，不动还活着的
+        List<String> chain = draft.jumpChainIds();
+        List<String> existing = new ArrayList<>();
+        for (Host h : store.hosts()) existing.add(h.id);
+        if (JumpChain.pruneMissing(chain, existing) > 0) saveJumpChain(chain);
 
         LinearLayout root = Widgets.screen(this);
 
@@ -219,18 +220,29 @@ public class HostEditActivity extends Activity {
         });
     }
 
-    /** 跳板机选择行 */
+    /** 2.2.0：跳板机链编辑器。按顺序列出每一跳，点一跳可上移 / 下移 / 移除；底部可追加。 */
     private void renderJumpRow() {
         jumpHost.removeAllViews();
 
-        Host jump = draft.jumpId == null || draft.jumpId.isEmpty()
-                ? null : store.host(draft.jumpId);
-        jumpHost.addView(Widgets.pickRow(this, "server", "跳板机",
-                jump == null ? "不使用（直连）" : jump.label(), this::pickJump));
-
-        if (jump != null) {
+        List<String> chain = draft.jumpChainIds();
+        if (chain.isEmpty()) {
+            jumpHost.addView(Widgets.pickRow(this, "server", "跳板机",
+                    "不使用（直连）", this::pickJumpToAdd));
+        } else {
+            for (int i = 0; i < chain.size(); i++) {
+                final int index = i;
+                Host hop = store.host(chain.get(i));
+                // pickRow：小字是序号，大字是主机名
+                String label = "第 " + (i + 1) + " 跳" + (i == 0 ? " · 手机先连它" : " · 从上一跳转发");
+                String value = hop == null ? "已删除的主机" : hop.label();
+                jumpHost.addView(Widgets.pickRow(this, "server", label, value,
+                        () -> editJumpHop(index)));
+            }
+            jumpHost.addView(Widgets.pickRow(this, "plus", "跳板机",
+                    "添加跳板机（最多 " + JumpChain.MAX_JUMPS + " 跳，已有 " + chain.size() + " 跳）",
+                    this::pickJumpToAdd));
             TextView note = UI.text(this,
-                    "连接时先登录 " + jump.label() + "，再从它转发到这台主机。",
+                    "连接时按顺序逐级转发，每一级先试 direct-tcpip，不通再试 nc / ncat / socat。",
                     11f, UI.MUTED);
             note.setLineSpacing(UI.dp(3), 1f);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -241,35 +253,65 @@ public class HostEditActivity extends Activity {
         }
     }
 
-    private void pickJump() {
-        List<Host> all = store.hosts();
+    /** 把链写回 draft：jumpIds 为准，jumpId 只留第一跳供旧代码读。 */
+    private void saveJumpChain(List<String> chain) {
+        draft.jumpIds = JumpChain.toJson(chain);
+        draft.jumpId = chain == null || chain.isEmpty() ? "" : chain.get(0);
+    }
+
+    /** 点某一跳：上移 / 下移 / 移除。 */
+    private void editJumpHop(int index) {
+        List<String> chain = draft.jumpChainIds();
+        if (index < 0 || index >= chain.size()) return;
+        Host hop = store.host(chain.get(index));
+        Dialogs.sheet(this, hop == null ? "第 " + (index + 1) + " 跳" : hop.label(),
+                new String[]{"上移一位", "下移一位", "移除这一跳"},
+                new String[]{"up", null, "trash"}, 2, idx -> {
+                    List<String> cur = draft.jumpChainIds();
+                    boolean changed = false;
+                    if (idx == 0) changed = JumpChain.moveUp(cur, index);
+                    else if (idx == 1) changed = JumpChain.moveDown(cur, index);
+                    else changed = JumpChain.remove(cur, index);
+                    if (changed) {
+                        saveJumpChain(cur);
+                        renderJumpRow();
+                    } else {
+                        UI.toast(this, idx == 2 ? "移除失败" : "已经到头了，移不动");
+                    }
+                });
+    }
+
+    /** 追加一跳：只列还没进链、也不是自己的主机；满 5 跳时直接提示。 */
+    private void pickJumpToAdd() {
+        List<String> chain = draft.jumpChainIds();
+        if (chain.size() >= JumpChain.MAX_JUMPS) {
+            UI.toast(this, "跳板机链最多 " + JumpChain.MAX_JUMPS + " 级，先移除一跳再加");
+            return;
+        }
         List<Host> candidates = new ArrayList<>();
-        for (Host h : all) {
+        for (Host h : store.hosts()) {
             if (h.id.equals(draft.id)) continue;
-            if (h.id.equals(draft.jumpId) && false) continue;
+            if (chain.contains(h.id)) continue;
             candidates.add(h);
         }
-
-        String[] labels = new String[candidates.size() + 1];
-        String[] subs = new String[candidates.size() + 1];
-        labels[0] = "不使用（直连）";
-        subs[0] = "直接从手机连目标主机";
-
-        int selected = 0;
-        for (int i = 0; i < candidates.size(); i++) {
-            Host h = candidates.get(i);
-            labels[i + 1] = h.label();
-            subs[i + 1] = h.subtitle();
-            if (h.id.equals(draft.jumpId)) selected = i + 1;
+        if (candidates.isEmpty()) {
+            UI.toast(this, "没有可用的跳板机，先在主机列表里加一台");
+            return;
         }
-
-        Dialogs.choose(this, "选择跳板机", labels, subs, selected, idx -> {
-            if (idx == 0) {
-                draft.jumpId = "";
+        String[] labels = new String[candidates.size()];
+        String[] subs = new String[candidates.size()];
+        for (int i = 0; i < candidates.size(); i++) {
+            labels[i] = candidates.get(i).label();
+            subs[i] = candidates.get(i).subtitle();
+        }
+        Dialogs.choose(this, "添加跳板机", labels, subs, -1, idx -> {
+            List<String> cur = draft.jumpChainIds();
+            if (JumpChain.add(cur, candidates.get(idx).id, draft.id)) {
+                saveJumpChain(cur);
+                renderJumpRow();
             } else {
-                draft.jumpId = candidates.get(idx - 1).id;
+                UI.toast(this, "加不进去：重复、自己或已满 " + JumpChain.MAX_JUMPS + " 跳");
             }
-            renderJumpRow();
         });
     }
 
