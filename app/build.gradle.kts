@@ -12,8 +12,8 @@ android {
         // 2.1.0：34 → 35。Android 15（API 35）起 Play 要求 targetSdk ≥ 35；
         // compileSdk 仍 36，minSdk 26（Android 8.0+）不变。
         targetSdk = 35
-        versionCode = 3
-        versionName = "2.1.0"
+        versionCode = 4
+        versionName = "2.2.0"
     }
 
     compileOptions {
