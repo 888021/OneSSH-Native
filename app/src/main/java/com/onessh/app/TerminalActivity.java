@@ -7,6 +7,8 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -23,6 +25,7 @@ import com.onessh.app.data.Host;
 import com.onessh.app.data.Snippet;
 import com.onessh.app.data.Store;
 import com.onessh.app.ssh.HostKeyPrompt;
+import com.onessh.app.ssh.ReconnectPolicy;
 import com.onessh.app.ssh.SshSession;
 import com.onessh.app.term.TermColors;
 import com.onessh.app.term.TerminalView;
@@ -63,6 +66,12 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
     private String adHocPassword;
 
     private boolean keysVisible = true;
+
+    /** 2.2.0 自动重连：意外断开时按 ReconnectPolicy 退避重试，最多 3 次。 */
+    private final Handler reconnectHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingRetry;
+    private int retryAttempts;
+    private boolean userClosed;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -361,6 +370,9 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
     }
 
     private void connect() {
+        cancelPendingRetry();
+        userClosed = false;
+        retryAttempts = 0;
         if (session != null) session.close();
         showOverlay("connecting", getString(R.string.connecting), null);
         setStatus("connecting", getString(R.string.connecting));
@@ -392,24 +404,89 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
         if (isFinishing()) return;
         switch (state) {
             case "connected":
+                retryAttempts = 0;
+                cancelPendingRetry();
                 hideOverlay();
                 setStatus("connected", getString(R.string.connected));
+                SshForegroundService.start(this,
+                        host != null ? host.label() : adHocUser + "@" + adHocHost);
                 if (host != null) store.touchHost(host.id);
                 break;
             case "closed":
+                SshForegroundService.stop(this);
                 SessionRegistry.clear();
                 setStatus("closed", getString(R.string.disconnected));
+                if (scheduleRetry("会话已结束。可以重新连接。")) break;
                 showOverlay("closed", getString(R.string.disconnected),
                         "会话已结束。可以重新连接。");
                 break;
             case "error":
+                SshForegroundService.stop(this);
                 SessionRegistry.clear();
                 setStatus("error", getString(R.string.disconnected));
+                if (scheduleRetry(message)) break;
                 showOverlay("error", "连接失败", message);
                 break;
             default:
                 setStatus(state, getString(R.string.connecting));
                 break;
+        }
+    }
+
+    /**
+     * 意外断开时自动重连：返回 true 表示已安排重试（浮层先不盖死，等重试结果）。
+     * 用户主动断开、或已试满 3 次时返回 false，调用方照常显示浮层。
+     */
+    private boolean scheduleRetry(String detail) {
+        if (!ReconnectPolicy.shouldRetry(userClosed, retryAttempts)) return false;
+        retryAttempts++;
+        long delay = ReconnectPolicy.delayForAttempt(retryAttempts);
+        if (delay < 0) return false;
+        setStatus("error", "已断开，" + (delay / 1000) + " 秒后自动重连（"
+                + retryAttempts + "/" + ReconnectPolicy.MAX_ATTEMPTS + "）");
+        showOverlay("connecting", "正在自动重连（" + retryAttempts + "/"
+                + ReconnectPolicy.MAX_ATTEMPTS + "）", detail);
+        pendingRetry = () -> {
+            pendingRetry = null;
+            if (userClosed || isFinishing()) return;
+            if (term != null) term.clearScreen();
+            connectWithoutReset();
+        };
+        reconnectHandler.postDelayed(pendingRetry, delay);
+        return true;
+    }
+
+    /** 自动重试用的连接：不重置 retryAttempts（手动点“重新连接”才重置）。 */
+    private void connectWithoutReset() {
+        cancelPendingRetry();
+        if (session != null) session.close();
+        showOverlay("connecting", getString(R.string.connecting), null);
+        setStatus("connecting", getString(R.string.connecting));
+        SshSession.Config cfg = buildConfig();
+        if (cfg.host == null || cfg.host.isEmpty()) {
+            showOverlay("error", "没有可连接的地址", null);
+            return;
+        }
+        session = new SshSession(cfg, new SshSession.Listener() {
+            @Override
+            public void onOutput(byte[] data) {
+                if (term != null) term.feed(data);
+            }
+
+            @Override
+            public void onState(String state, String message) {
+                runOnUiThread(() -> handleState(state, message));
+            }
+        }, this::verifyHostKey);
+        Thread t = new Thread(session::connect, "ssh-connect");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void cancelPendingRetry() {
+        if (pendingRetry != null) {
+            reconnectHandler.removeCallbacks(pendingRetry);
+            pendingRetry = null;
         }
     }
 
@@ -732,6 +809,9 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
     private void askDisconnect() {
         Dialogs.confirm(this, "断开连接", "当前会话会立即结束，远端正在跑的任务可能被中断。",
                 "断开", true, () -> {
+                    userClosed = true;
+                    cancelPendingRetry();
+                    SshForegroundService.stop(this);
                     if (session != null) session.close();
                     finish();
                 });
@@ -747,6 +827,9 @@ public class TerminalActivity extends Activity implements TerminalView.Listener 
     protected void onDestroy() {
         // 最小化时不走这里；真走到这里就是页面销毁，会话跟着关，
         // 登记也要清掉，主机列表上的悬浮卡片才不会变成死按钮。
+        userClosed = true;
+        cancelPendingRetry();
+        SshForegroundService.stop(this);
         SessionRegistry.clearIf(this);
         if (session != null) session.close();
         super.onDestroy();
