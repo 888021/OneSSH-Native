@@ -1,6 +1,7 @@
 package com.onessh.app;
 
 import android.app.Activity;
+import android.app.KeyguardManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -40,6 +41,10 @@ public class MainActivity extends Activity {
 
     private static final String PREFS = "ui";
     private static final String PREF_COLLAPSED = "collapsedGroups";
+    private static final int REQ_APP_LOCK = 2001;
+
+    /** 2.2.0 应用锁：进程内验证过一次后就不再反复弹，杀进程后要重新验证。 */
+    private static boolean unlockedForSession;
 
     private Store store;
 
@@ -62,6 +67,8 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         store = Store.get(this);
         setTheme(R.style.AppTheme);
+        // 2.2.0 应用锁：开了锁且本进程还没验证过，先弹系统锁屏验证
+        if (store.appLock() && !unlockedForSession) requestAppLock();
         loadCollapsed();
 
         LinearLayout root = UI.row(this);
@@ -97,6 +104,44 @@ public class MainActivity extends Activity {
         super.onResume();
         render();
         updateMinimizedCard();
+    }
+
+    /**
+     * 2.2.0 应用锁：用系统锁屏（密码 / 图案 / 指纹）验证一次。
+     * 没设锁屏时 createConfirmDeviceCredentialIntent 返回 null，直接放行，
+     * 避免把用户锁在门外；验证失败或取消时直接退出 App。
+     */
+    private void requestAppLock() {
+        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        if (km == null || !km.isKeyguardSecure()) {
+            unlockedForSession = true;
+            UI.toast(this, "未设置锁屏密码，应用锁暂不生效");
+            return;
+        }
+        Intent intent = km.createConfirmDeviceCredentialIntent(
+                "验证身份", "打开 OneSSH 前请先验证");
+        if (intent == null) {
+            unlockedForSession = true;
+            return;
+        }
+        try {
+            startActivityForResult(intent, REQ_APP_LOCK);
+        } catch (Exception e) {
+            unlockedForSession = true;
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_APP_LOCK) {
+            if (resultCode == RESULT_OK) {
+                unlockedForSession = true;
+            } else {
+                // 验证失败或点了取消：不让进，直接退出
+                finish();
+            }
+        }
     }
 
     @Override
