@@ -1,6 +1,8 @@
 package com.onessh.app;
 
 import android.app.Activity;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
@@ -14,10 +16,17 @@ import com.onessh.app.ui.Dialogs;
 import com.onessh.app.ui.UI;
 import com.onessh.app.ui.Widgets;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
-/** 设置：字号、常亮、已信任的主机密钥、清空数据、关于。 */
+/** 设置：字号、常亮、应用锁、已信任的主机密钥、备份 / 导入、清空数据、关于。 */
 public class SettingsActivity extends Activity {
+
+    private static final int REQ_EXPORT = 1001;
+    private static final int REQ_IMPORT = 1002;
 
     private Store store;
     private LinearLayout root;
@@ -53,6 +62,8 @@ public class SettingsActivity extends Activity {
         /* 安全 */
         LinearLayout sec = Widgets.cardBox(this);
         sec.addView(Widgets.cardTitle(this, getString(R.string.settings_security)));
+        sec.addView(appLockRow());
+        sec.addView(UI.hline(this, UI.LINE2));
 
         Map<String, String> known = store.knownHosts();
         if (known.isEmpty()) {
@@ -68,6 +79,20 @@ public class SettingsActivity extends Activity {
         /* 数据 */
         LinearLayout data = Widgets.cardBox(this);
         data.addView(Widgets.cardTitle(this, "数据"));
+        TextView backupHint = UI.text(this,
+                "备份包含主机、凭据和片段；密码 / 私钥仍是本机 Keystore 密文，换设备后要重填，不要发给别人。",
+                11f, UI.MUTED2);
+        backupHint.setLineSpacing(UI.dp(3), 1f);
+        data.addView(backupHint);
+        LinearLayout exportBtn = Widgets.button(this, "导出备份", "download", false);
+        Widgets.top(exportBtn, 10);
+        exportBtn.setOnClickListener(v -> exportBackup());
+        data.addView(exportBtn);
+        LinearLayout importBtn = Widgets.button(this, "导入备份", "upload", false);
+        Widgets.top(importBtn, 8);
+        importBtn.setOnClickListener(v -> importBackup());
+        data.addView(importBtn);
+        data.addView(UI.hline(this, UI.LINE2));
         LinearLayout clear = Widgets.button(this, getString(R.string.settings_clear), "trash", false);
         ((TextView) clear.getChildAt(1)).setTextColor(UI.RED);
         clear.setBackground(UI.ripple(UI.bg(0xFFFFF7F6, 10f, 0xFFF0D5D1, 1f), 10f));
@@ -148,6 +173,99 @@ public class SettingsActivity extends Activity {
         sw.setOnChange(store::setKeepAwake);
         row.addView(sw);
         return row;
+    }
+
+    /** 2.2.0 应用锁：打开 App 时用锁屏密码 / 指纹验证一次。 */
+    private View appLockRow() {
+        LinearLayout row = UI.row(this);
+        UI.padding(row, 0, 12, 0, 12);
+
+        LinearLayout col = UI.column(this);
+        col.addView(UI.text(this, "应用锁", 13.5f, UI.INK));
+        col.addView(UI.text(this, "打开 App 时用锁屏密码 / 指纹验证，没设锁屏就直接进", 11f, UI.MUTED2));
+        row.addView(col);
+        UI.weight(col, 1f);
+
+        Widgets.Toggle sw = new Widgets.Toggle(this, store.appLock());
+        sw.setOnChange(on -> {
+            store.setAppLock(on);
+            UI.toast(this, on ? "已开启应用锁，下次打开要验证" : "已关闭应用锁");
+        });
+        row.addView(sw);
+        return row;
+    }
+
+    /* --------------------------------------------------------- 备份 / 导入 */
+
+    private void exportBackup() {
+        String text = store.exportBackup();
+        if (text == null || text.isEmpty()) {
+            UI.toast(this, "没什么可备份的");
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/json");
+        i.putExtra(Intent.EXTRA_TITLE, "onessh-backup.json");
+        try {
+            startActivityForResult(i, REQ_EXPORT);
+        } catch (Exception e) {
+            UI.toast(this, "没有可用的文件选择器");
+        }
+    }
+
+    private void importBackup() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(i, REQ_IMPORT);
+        } catch (Exception e) {
+            UI.toast(this, "没有可用的文件选择器");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        if (requestCode == REQ_EXPORT) {
+            String text = store.exportBackup();
+            if (text == null) return;
+            try (OutputStream os = getContentResolver().openOutputStream(uri)) {
+                if (os == null) throw new Exception("打不开目标文件");
+                os.write(text.getBytes(StandardCharsets.UTF_8));
+                os.flush();
+                UI.toast(this, "备份已导出");
+            } catch (Exception e) {
+                UI.toast(this, "导出失败：" + e.getMessage());
+            }
+        } else if (requestCode == REQ_IMPORT) {
+            String text;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) throw new Exception("读不到文件");
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+                text = new String(bos.toByteArray(), StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                UI.toast(this, "读取失败：" + e.getMessage());
+                return;
+            }
+            final String backupText = text;
+            Dialogs.confirm(this, "导入备份",
+                    "会用备份里的内容整体替换现在的主机、凭据、片段和设置，当前数据会被覆盖。建议先导出一份备份再导入。",
+                    "导入并覆盖", true, () -> {
+                        if (store.importBackup(backupText)) {
+                            UI.toast(this, "已导入备份");
+                            build();
+                        } else {
+                            UI.toast(this, "导入失败：不是 OneSSH 的备份文件");
+                        }
+                    });
+        }
     }
 
     private View knownRow(String hostPort, String fingerprint) {
