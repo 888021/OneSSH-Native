@@ -6,7 +6,7 @@
 
 自绘终端 · 多跳 ProxyJump · SFTP · 零云端依赖
 
-![版本](https://img.shields.io/badge/version-2.1.0-2563EB?style=flat-square)
+![版本](https://img.shields.io/badge/version-2.2.0-2563EB?style=flat-square)
 ![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white)
 ![JDK](https://img.shields.io/badge/JDK-21-ED8B00?style=flat-square)
 ![Gradle](https://img.shields.io/badge/Gradle-9.3.1-02303A?style=flat-square&logo=gradle&logoColor=white)
@@ -77,11 +77,11 @@
 | 手动 `Run workflow` | ✅ | ✅ | ✅ |
 | Pull Request | ✅ | ✅ | — |
 
-产物：`OneSSH-2.1.0-debug.apk`（可直接安装）、`OneSSH-2.1.0-release.apk`（配好签名 Secrets 后为已签名包，未配则为 unsigned 包，见下文签名一节）。在 **Actions → 对应 run → Artifacts** 下载，保留 30 天。
+产物：`OneSSH-2.2.0-debug.apk`（可直接安装）、`OneSSH-2.2.0-release.apk`（配好签名 Secrets 后为已签名包，未配则为 unsigned 包，见下文签名一节）。在 **Actions → 对应 run → Artifacts** 下载，保留 30 天。
 
 > 🔑 CI 使用仓库内固定的 debug 密钥签名，**每次构建的 debug 包签名一致，可直接覆盖安装**。若手机提示「软件包冲突 / 开发者签名异常」，说明旧版是另一把密钥签的：先卸载旧版再安装（会清空应用数据），之后升级就不会再冲突。
 
-**版本号只改一处**：`app/build.gradle.kts` 的 `versionCode` / `versionName`（当前 `3` / `2.1.0`）。改了就出新版本 Release，不改就更新现有 Release 里的 APK；不用打标签、不用勾选开关。
+**版本号只改一处**：`app/build.gradle.kts` 的 `versionCode` / `versionName`（当前 `4` / `2.2.0`）。改了就出新版本 Release，不改就更新现有 Release 里的 APK；不用打标签、不用勾选开关。
 
 ### 本地
 
@@ -98,7 +98,13 @@ JDK 17+（实测 21）· Android SDK 36 + build-tools `36.0.0` · Gradle 9.3.1 /
 ./gradlew testDebugUnitTest   # 只跑纯 Java 的 term / ssh 纯函数测试，不需要真机、模拟器或 SSH 服务器
 ```
 
-测试在 `app/src/test/java/com/onessh/app/`：`AnsiParserTest`（转义序列、光标、SGR、DSR 应答）、`TerminalBufferTest`（宽字符、换行、回滚、备用屏、擦除）、`SshSessionTest`（指纹 `SHA256:`、主机端口格式化）。
+测试在 `app/src/test/java/com/onessh/app/`：`AnsiParserTest`（转义序列、光标、SGR、DSR 应答）、`TerminalBufferTest`（宽字符、换行、回滚、备用屏、擦除）、`SshSessionTest`（指纹 `SHA256:`、主机端口格式化）、`JumpChainTest`（跳板链解析 / 上移下移 / 满 5 跳拒绝）、`BackupTest`（备份包一层标记、字符串里的花括号）、`ReconnectPolicyTest`（3s / 6s / 12s 退避、最多 3 次）。CI 每次构建都会先跑 `./gradlew testDebugUnitTest`，测试失败就停住，不再编译 APK。
+
+## 🔒 应用锁 · 💾 备份 · 🔁 自动重连（2.2.0）
+
+- **应用锁**：设置 → 安全 → 打开「应用锁」，下次打开 App 要先过系统锁屏（密码 / 图案 / 指纹）验证；没设锁屏时直接放行，不会把人锁在门外。验证只在进程内记一次，杀进程后要重新验证。
+- **备份 / 导入**：设置 → 数据 → 「导出备份」存成 `onessh-backup.json`，「导入备份」会整体替换当前数据，导入前会先弹窗确认。备份里的密码 / 私钥仍是本机 Keystore 密文，换设备后要重填，主机、分组、片段、已信任指纹不受影响。
+- **自动重连 + 前台服务**：终端意外断开时自动重试最多 3 次（3s / 6s / 12s），手动断开、点了返回、试满 3 次就不再重试；连上之后跑一个低优先级前台服务并显示通知，降低切后台 / 锁屏后被系统回收的概率。会话本身仍归终端页所有，页面销毁后会话还是会关。
 
 <details>
 <summary><b>🔧 进阶 · 首次上传 / 签名 Release / 目录结构 / CI 备注</b></summary>
@@ -107,7 +113,7 @@ JDK 17+（实测 21）· Android SDK 36 + build-tools `36.0.0` · Gradle 9.3.1 /
 
 ```bash
 git init && git add . && git update-index --chmod=+x gradlew
-git commit -m "Initial commit: OneSSH 2.1.0"
+git commit -m "Initial commit: OneSSH 2.2.0"
 git remote add origin git@github.com:<OWNER>/<REPO>.git && git push -u origin main
 ```
 
@@ -120,8 +126,8 @@ git remote add origin git@github.com:<OWNER>/<REPO>.git && git push -u origin ma
 ```bash
 keytool -genkeypair -v -keystore keystore/onessh-release.jks -alias onessh-release -keyalg RSA -keysize 2048 -validity 10000
 $ANDROID_HOME/build-tools/36.0.0/zipalign -p -f 4 app/build/outputs/apk/release/app-release-unsigned.apk /tmp/aligned.apk
-$ANDROID_HOME/build-tools/36.0.0/apksigner sign --ks keystore/onessh-release.jks --out OneSSH-2.1.0.apk /tmp/aligned.apk
-$ANDROID_HOME/build-tools/36.0.0/apksigner verify OneSSH-2.1.0.apk
+$ANDROID_HOME/build-tools/36.0.0/apksigner sign --ks keystore/onessh-release.jks --out OneSSH-2.2.0.apk /tmp/aligned.apk
+$ANDROID_HOME/build-tools/36.0.0/apksigner verify OneSSH-2.2.0.apk
 ```
 
 CI 直接出签名包（已接通）：把 keystore 以 base64 存进仓库 Secrets `ONESSH_KEYSTORE_BASE64`，并配 `ONESSH_KEYSTORE_PASSWORD` / `ONESSH_KEY_ALIAS` / `ONESSH_KEY_PASSWORD`，`app/build.gradle.kts` 会用 `System.getenv()` 配 `signingConfigs.release`；没配 Secrets 时 Release 仍按 unsigned 构建，不会让构建失败。自用直接装 debug 包即可。
@@ -159,6 +165,6 @@ app/libs/jsch-2.28.8.jar   唯一第三方依赖
 
 <div align="center">
 
-**OneSSH 2.1.0** · 数据只在本机 · 无账号 · 无云同步 · 本地单元测试：`term` 包（AnsiParser / TerminalBuffer）+ `SshSession` 纯函数
+**OneSSH 2.2.0** · 数据只在本机 · 无账号 · 无云同步 · 本地单元测试：`term` 包（AnsiParser / TerminalBuffer）+ `SshSession` 纯函数
 
 </div>
