@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.2.0] - 2026-11-15
+
+P1 全做（2.1.0 详细分析后 jin 选了「P1 全做」）：
+
+### 新增
+- 🔀 跳板机链编辑器：主机表单里按顺序列出每一跳，点一跳可上移 / 下移 / 移除，底部可追加，最多 5 跳；纯函数 `data/JumpChain.java`（解析 / 追加 / 移动 / 剪掉已删主机）+ `JumpChainTest`（7 个测试）。
+- 💾 备份 / 导入：设置 → 数据 → 导出 `onessh-backup.json` / 导入并整体替换，导入前弹窗确认；纯函数 `data/Backup.java`（带格式标记，兼容直接拿原 `onessh.json` 当备份）+ `BackupTest`（4 个测试）。密码 / 私钥仍是本机 Keystore 密文，换设备后要重填。
+- 🔁 自动重连 + 前台服务：意外断开自动重试最多 3 次（3s / 6s / 12s 退避，`ssh/ReconnectPolicy.java` + 测试）；连上后跑 `SshForegroundService`（`dataSync` 类型 + 低优先级通知），降低切后台后被回收的概率。会话仍归终端页所有，页面销毁后会话照常关闭。
+- 🔒 应用锁：设置 → 安全 → 开关，打开 App 时用系统锁屏（密码 / 图案 / 指纹）验证一次；没设锁屏直接放行，验证失败或取消直接退出；进程内只验证一次。
+
+### 改进
+- 🧪 CI 先跑测试：`build.yml` 在编译 APK 之前跑 `./gradlew testDebugUnitTest`，失败直接停住，并上传测试报告（30 天）。
+- 🧪 测试 23 → 36 个：新增 `JumpChainTest`（7）、`BackupTest`（4）、`ReconnectPolicyTest`（2），加上原有的 AnsiParser / TerminalBuffer / SshSession 测试。
+
+### 限制（说清楚）
+- 前台服务只保进程优先级，不替终端页保会话；杀进程、页面销毁后会话还是会断。
+- 应用锁只拦 App 入口（MainActivity），不重新加密已存数据；Keystore 密钥本身没改。
+- 备份换设备后密码 / 私钥要重填，见 `data/Backup.java` 的说明。
+
 ## [2.1.0] - 2026-11-15
 
 基于 Fork `888021/OneSSH-Native`（上游 `jinhuaitao/OneSSH-Native` main `6d8be58`，27 提交，v2.0.0）。
